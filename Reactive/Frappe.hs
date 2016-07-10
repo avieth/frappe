@@ -24,6 +24,7 @@ module Reactive.Frappe (
   , applyEvents
   , (>*<)
   , unionEvents
+  , semigroupUnionEvents
   , repeatIndefinitely
   , commuteEvent
   , transEvent
@@ -52,6 +53,7 @@ module Reactive.Frappe (
 
   ) where
 
+import Control.Applicative
 import Control.Monad (ap)
 import Control.Concurrent
 import qualified Control.Concurrent.Async as Async
@@ -64,6 +66,7 @@ import Control.Monad.Trans.State
 import Control.Monad.Cached
 import qualified Data.Vault.Lambda as LVault
 import Data.Bifunctor (bimap)
+import Data.Semigroup
 
 -- |
 -- = Sampler
@@ -239,6 +242,10 @@ instance Functor f => Applicative (Event r f) where
 instance Functor f => Monad (Event r f) where
   return = pure
   (>>=) = andThen
+
+instance (Functor f) => Alternative (Event r f) where
+  empty = never
+  left <|> right = unionEvents const left right
 
 -- |
 -- = Composing events monadically
@@ -563,6 +570,13 @@ recomposePulses left right both = fmap recompose
     PDRight r -> right r
     PDBoth l r -> both l r
 
+semigroupUnionEvents
+  :: ( Functor f, Semigroup t )
+  => Event r f t
+  -> Event r f t
+  -> Event r f t
+semigroupUnionEvents = unionEvents (<>)
+
 -- This may prove *very* useful: get an event which fires whenever the side
 -- channel *or* the final value fires. If the side channel fires, give the
 -- continuation.
@@ -601,7 +615,10 @@ sync io = Now $ ReaderT $ \_ -> io
 async :: Functor f => IO t -> Now r q f (Event x f t)
 async io = do
   (ev, cb) <- primEvent
-  sync (Async.withAsync (io >>= cb) (const (pure ev)))
+  _ <- sync $ do result <- Async.async (io >>= cb)
+                 Async.link result
+  pure ev
+  --sync (Async.withAsync (io >>= cb) (const (pure ev)))
 
 asyncOS :: Functor f => IO t -> Now r q f (Event x f t)
 asyncOS io = do
