@@ -42,6 +42,8 @@ module Reactive.Frappe (
 
   , Now
   , sync
+  , async
+  , asyncOS
   , primEvent
 
   , Network
@@ -52,6 +54,7 @@ module Reactive.Frappe (
 
 import Control.Monad (ap)
 import Control.Concurrent
+import qualified Control.Concurrent.Async as Async
 import Control.Monad.Embedding
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader
@@ -80,19 +83,19 @@ newtype Sampler r f t = Sampler {
     unSampler :: Cached r (SyncF f) t
   }
 
-instance Functor f => Functor (Sampler r f) where
+instance Functor (Sampler r f) where
   fmap f = Sampler . fmap f . unSampler
 
 -- | Construct a sampler from some IO computation.
-sampler :: Functor f => IO t -> Sampler r f t
+sampler :: IO t -> Sampler r f t
 sampler io = Sampler (cached liftSyncIO (lift (lift io)))
 
 -- | Sample a Sampler when some event fires.
-sample :: Functor f => Sampler r f (s -> t) -> Event r f s -> Event r f t
+sample :: Sampler r f (s -> t) -> Event r f s -> Event r f t
 sample (Sampler cached) = mapEventCached (\t -> cached <*> pure t)
 
 infixl 4 <!>
-(<!>) :: Functor f => Sampler r f (s -> t) -> Event r f s -> Event r f t
+(<!>) :: Sampler r f (s -> t) -> Event r f s -> Event r f t
 (<!>) = sample
 
 -- |
@@ -106,13 +109,13 @@ infixl 4 <!>
 
 -- | A single-step function.
 newtype Stepper r f t = Stepper {
-    unStepper :: (Cached r (SyncF f) t, Event r f t)
+    getStepper :: (Cached r (SyncF f) t, Event r f t)
   }
 
-instance Functor f => Functor (Stepper r f) where
+instance Functor (Stepper r f) where
   fmap f (Stepper (initial, next)) = Stepper (fmap f initial, fmap f next)
 
-stepper :: Functor f => SyncF f t -> Event r f t -> Stepper r f t
+stepper :: SyncF f t -> Event r f t -> Stepper r f t
 stepper syncf event = Stepper (cachedTerm, event)
   where
   cachedTerm = cached liftSyncIO (lift syncf)
@@ -147,8 +150,6 @@ infixl 4 <@>
 
 -- TBD is this single-step presentation sufficient to do all that lovely
 -- classical reactive programming?
-
-
 
 -- Stores functions from pulses (primitives events) to some value.
 -- Running an event (primEvent callback) will check the pulses of the top-level
@@ -199,7 +200,7 @@ liftWriterSync = WriterT . liftSyncF . runWriterT
 
 -- | A SyncF can be injected into IO by using an Embedding.
 embedSyncF
-  :: forall f m t .
+  :: forall f t .
      ( Functor f )
   => SyncF f t
   -> StateT (Embedding f IO) IO t
@@ -225,7 +226,7 @@ newtype Event (r :: *) (f :: * -> *) (t :: *) = Event {
 data Delay r f t where
   Delay :: Pulses r f t -> Delay r f t
 
-instance Functor f => Functor (Event r f) where
+instance Functor (Event r f) where
   fmap = mapEvent
 
 instance Functor f => Applicative (Event r f) where
@@ -268,7 +269,7 @@ now writer = immediate term
 
 immediate
   :: forall r f t .
-     ( Functor f )
+     ( )
   => WriterT [r] (SyncF f) t
   -> Event r f t
 immediate term =
@@ -276,7 +277,7 @@ immediate term =
       term' = fmap Left term
   in  Event (cached liftSyncIO term')
 
-delayed :: Functor f => Delay r f t -> Event r f t
+delayed :: Delay r f t -> Event r f t
 delayed = Event . pure . Right
 
 fromDelay
@@ -285,7 +286,7 @@ fromDelay
   -> Event r f t
 fromDelay delay = Event (pure (Right delay))
 
-never :: ( Functor f ) => Event r f t
+never :: Event r f t
 never = Event $ pure (Right indefiniteDelay)
 
 indefiniteDelay :: Delay r f t
@@ -306,14 +307,14 @@ andThen ev next = switchEvent (mapEvent next ev)
 
 pureEvent
   :: forall r f t .
-     ( Functor f )
+     ( )
   => t
   -> Event r f t
 pureEvent t = Event $ pure (Left t)
 
 commuteEvent
   :: forall r g x y f t .
-     ( Functor g )
+     ( )
   => Event r g (Now x y f t)
   -> Now x y f (Event r g t)
 commuteEvent event = Now $ do
@@ -332,14 +333,6 @@ mapDelay f (Delay pulses) = Delay pulses'
   where
   pulses' :: Pulses r f t
   pulses' = fmap (mapEvent f) pulses
-
-flatMapEvent
-  :: forall r f s t .
-     ( Functor f )
-  => (s -> WriterT [r] f t)
-  -> Event r f s
-  -> Event r f t
-flatMapEvent k = mapEventF (liftWriterSync . k)
 
 -- | Bind a cached computation through an event.
 mapEventCached
@@ -368,7 +361,7 @@ mapDelayCached k (Delay pulses) = Delay pulses'
 -- | Cache a computation and bind it through an event.
 mapEventF
   :: forall r f s t .
-     ( Functor f )
+     ( )
   => (s -> WriterT [r] (SyncF f) t)
   -> Event r f s
   -> Event r f t
@@ -589,54 +582,6 @@ factorEvent event = event'
       Left t -> pure (Left (Right (t, rs)))
       Right (delay :: Delay r f t) -> pure (Left (Left (delay, rs)))
 
-{-
-siphonEvent
-  :: forall r f t q s .
-     ( Functor f )
-  => ([r] -> Delay r f t -> React (Event q f s))
-  -> (t -> React (Event q f s))
-  -> Event r f t
-  -> React (Event q f s)
-siphonEvent nextr nextt event = do
-  siphoned <- react event'
-  pure (switchEvent siphoned)
-  where
-  event' :: Event q f (React (Event q f s))
-  event' = Event $ do
-    (choice, rs) <- withResidues (unEvent event)
-    case choice of
-      Left done -> pure (Left (nextt done))
-      Right delay -> pure (Left (nextr rs delay))
-
-stepper
-  :: forall r q f t .
-     ( Functor f )
-  => f t
-  -> Event r f t
-  -> React (Event t f q)
-stepper ft event = do
-  ev :: Event t f t <- immediate (lift (liftSyncF ft))
-  _
--}
-
-{-
--- No sense filtering events right?
---
--- NB effects may still run even if the event doesn't ultimately fire!
--- Those effects are needed in order to determine whether the event is Just
--- or Nothing.
-filterEvent :: forall f t . Monad f => Event (Maybe r) f (Maybe t) -> Event f t
-filterEvent (Delayed pulses) = Delayed pulses'
-  where
-  k :: Cached f (Maybe t, Event f (Maybe t)) -> Cached f (t, Event f t)
-  k term = do
-    (maybe, ev) <- term
-    case maybe of
-      Nothing -> Cached (MaybeT (pure Nothing))
-      Just t -> pure (t, filterEvent ev)
-  pulses' = fmap k pulses
--}
-
 data NowEnv r f t = NowEnv {
     nowChan :: Chan ([r], Maybe t)
   , nowEval :: MVar (Delay r f t, Embedding f IO)
@@ -653,8 +598,18 @@ deriving instance Monad (Now r q f)
 sync :: IO t -> Now r q f t
 sync io = Now $ ReaderT $ \_ -> io
 
+async :: Functor f => IO t -> Now r q f (Event x f t)
+async io = do
+  (ev, cb) <- primEvent
+  sync (Async.withAsync (io >>= cb) (const (pure ev)))
+
+asyncOS :: Functor f => IO t -> Now r q f (Event x f t)
+asyncOS io = do
+  (ev, cb) <- primEvent
+  sync (Async.withAsyncBound (io >>= cb) (const (pure ev)))
+
 -- | A primitive event and a function to fire it.
-primEvent :: forall r q x f t . Monad f => Now r q f (Event x f t, t -> IO ())
+primEvent :: forall r q x f t . Functor f => Now r q f (Event x f t, t -> IO ())
 primEvent = Now $ ReaderT $ \nowEnv -> do
   domainKey :: LVault.DomainKey t <- LVault.newDomainKey
   let pulse :: t -> Event x f t
@@ -666,14 +621,11 @@ primEvent = Now $ ReaderT $ \nowEnv -> do
   -- When the event fires, we grab the top-level event and check whether
   -- this event determines a computation for it. If it does, we recover a
   -- function  t -> f ((), Event f ())
-  --
-  -- Here's a problem: the event given might be immediate. We actually want
-  -- always to have a Delay in the environment.
   let cb = \t -> do stuff@(Delay pulses, embedding)
                       <- takeMVar (nowEval nowEnv)
                     case LVault.lookup domainKey pulses of
                       Nothing -> do
-                        _ <- putStrLn "Event unobserved; squelching"
+                        --_ <- putStrLn "Event unobserved; squelching"
                         putMVar (nowEval nowEnv) stuff
                       Just (computation :: t -> Event r f q) -> do
                         let Event cached = computation t
