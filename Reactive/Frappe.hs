@@ -55,6 +55,7 @@ module Reactive.Frappe (
 
 import Control.Applicative
 import Control.Monad (ap)
+import Control.Exception
 import Control.Concurrent
 import qualified Control.Concurrent.Async as Async
 import Control.Monad.Embedding
@@ -688,10 +689,25 @@ reactimate embedding (Now runIt) = do
       writeChan chan (rs, Nothing)
   pure (Network chan)
 
-runNetwork :: Network r q -> ([r] -> IO ()) -> (q -> IO z) -> IO z
-runNetwork network@(Network chan) k f = do
+runNetwork
+  :: Network r q
+  -> ([r] -> IO ()) -- ^ Respond to the side-channel.
+  -> (q -> IO z)    -- ^ Respond to the final value.
+  -> IO z           -- ^ Respond to a lock-up: no more events will fire.
+  -> IO z
+runNetwork network k f g = catch (runNetwork_ network k f) $
+  -- Blocked indefinitely on an mvar means the network is stuck.
+  \(e :: BlockedIndefinitelyOnMVar) -> g
+
+runNetwork_ :: Network r q -> ([r] -> IO ()) -> (q -> IO z) -> IO z
+runNetwork_ network@(Network chan) k f = do
+  -- We don't want this readChan to cause the runtime to kill the thread, in
+  -- case for instance the network is exhausted and there are no more references
+  -- to it (thread blocked indefinitely).
+  -- runNetwork catches BlockedIndefinitelyOnMVar and runs some default
+  -- IO response.
   (rs, out) <- readChan chan
   _ <- k rs
   case out of
     Just q -> f q
-    Nothing -> runNetwork network k f
+    Nothing -> runNetwork_ network k f

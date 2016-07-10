@@ -17,17 +17,29 @@ Different biasing can be expressed via unionEvents.
 import Control.Applicative ((<|>))
 import Control.Concurrent
 import Control.Monad.Embedding
+import Data.Functor.Identity
+import Data.Void
 import Reactive.Frappe
 
 main = do
 
-  let networkDescription = do
+  let networkDescription :: Now r q Identity (Event x Identity Bool)
+      networkDescription = do
         evTrue <- async $ threadDelay 500000 >> pure True
         evFalse <- async $ threadDelay 1000000 >> pure False
-        pure (evTrue <|> evFalse)
+        pure $ (evTrue <|> evFalse)
+
+  let sideChannel :: [Void] -> IO ()
+      sideChannel [] = pure ()
+      sideChannel (x : _) = absurd x
 
   network <- reactimate embedding networkDescription
-  outcome <- runNetwork network (\_ -> pure ()) pure
+  outcome <- runNetwork network
+                        -- Fires whenever the side-channel fires (event not
+                        -- necessarily done).
+                        sideChannel
+                        (pure . Just)
+                        (pure Nothing)
 
   -- The network delivers a Bool when it's done. Let's print it.
   print outcome
