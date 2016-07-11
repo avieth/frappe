@@ -34,8 +34,8 @@ import System.Mem.StableName
 import Unsafe.Coerce
 import GHC.Exts (Any)
 
-type Key r (f :: * -> *) t = WriterT [r] f t
-type Value r (f :: * -> *) t = (t, [r])
+type Key r (f :: * -> *) t = WriterT r f t
+type Value r (f :: * -> *) t = (t, r)
 
 type Cache r (f :: * -> *) = HM.HashMap Int [Any]
 
@@ -74,24 +74,24 @@ checkCache key cache = do
       if sn' `eqStableName` sn then Just v else checkCacheBucket sn rest
 
 -- | Tailor-made for use in defining events.
---   Cached r f t consists of WriterT [r] f terms which are cached using
+--   Cached r f t consists of WriterT r f terms which are cached using
 --   their stable names; the same term (on the heap) will have its effects
 --   realized at most once.
 --   This makes Cached r f *not* a monad, but it gives the desired semantics
 --   when wielded appropriately to define events.
 newtype Cached (r :: *) (f :: * -> *) (t :: *) = Cached {
-    getCached :: StateT (Cache r f) (WriterT [r] f) t
+    getCached :: StateT (Cache r f) (WriterT r f) t
   }
 
 deriving instance Functor f => Functor (Cached r f)
-deriving instance Monad f => Applicative (Cached r f)
-deriving instance Monad f => Monad (Cached r f)
+deriving instance (Monoid r, Monad f) => Applicative (Cached r f)
+deriving instance (Monoid r, Monad f) => Monad (Cached r f)
 
 runCached
   :: forall r f t .
-     ( Monad f )
+     ( Monoid r, Monad f )
   => Cached r f t
-  -> WriterT [r] f t
+  -> WriterT r f t
 runCached (Cached stateT) = evalStateT stateT emptyCache
 
 transCached
@@ -106,19 +106,19 @@ transCached trans (Cached (StateT mkwriterterm)) =
 
 cached
   :: forall r f t.
-     ( MonadIO f )
-  => WriterT [r] f t
+     ( Monoid r, MonadIO f )
+  => WriterT r f t
   -> Cached r f t
 cached term = Cached $ do
   cache <- get
-  value :: Maybe (t, [r]) <- liftIO $ checkCache term cache
+  value :: Maybe (t, r) <- liftIO $ checkCache term cache
   case value of
     -- Cache hit. Lift t in but ignore the writer output, as we don't want
     -- to make duplicate writes.
     Just (t, _) -> lift (pure t)
     -- Cache miss. Run the term and cache it.
     Nothing -> do
-      out :: (t, [r]) <- lift (listen term)
+      out :: (t, r) <- lift (listen term)
       cache' <- liftIO $ insertCache term out cache
       _ <- put cache'
       lift (pure (fst out))
@@ -126,12 +126,12 @@ cached term = Cached $ do
 -- | Include a complete cached computation and obtain its writer output.
 withResidues
   :: forall r s f t .
-     ( MonadIO f )
+     ( Monoid r, Monoid s, MonadIO f )
   => Cached r f t
-  -> Cached s f (t, [r])
+  -> Cached s f (t, r)
 withResidues (Cached statet) = Cached $ do
   cache <- get
-  let fterm :: f ((t, Cache r f), [r])
+  let fterm :: f ((t, Cache r f), r)
       fterm = runWriterT (runStateT statet cache)
   ((t, cache'), rs) <- lift (lift fterm)
   _ <- put cache'

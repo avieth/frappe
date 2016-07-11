@@ -96,15 +96,15 @@ instance Functor (Sampler r f) where
   fmap f = Sampler . fmap f . unSampler
 
 -- | Construct a sampler from some IO computation.
-sampler :: IO t -> Sampler r f t
+sampler :: ( Monoid r ) => IO t -> Sampler r f t
 sampler io = Sampler (cached (lift (lift io)))
 
 -- | Sample a Sampler when some event fires.
-sample :: Sampler r f (s -> t) -> Event r f s -> Event r f t
+sample :: ( Monoid r ) => Sampler r f (s -> t) -> Event r f s -> Event r f t
 sample (Sampler cached) = mapEventCached (\t -> cached <*> pure t)
 
 infixl 4 <!>
-(<!>) :: Sampler r f (s -> t) -> Event r f s -> Event r f t
+(<!>) :: ( Monoid r ) => Sampler r f (s -> t) -> Event r f s -> Event r f t
 (<!>) = sample
 
 -- |
@@ -124,7 +124,7 @@ newtype Stepper r f t = Stepper {
 instance Functor (Stepper r f) where
   fmap f (Stepper (initial, next)) = Stepper (fmap f initial, fmap f next)
 
-stepper :: SyncF f t -> Event r f t -> Stepper r f t
+stepper :: ( Monoid r ) => SyncF f t -> Event r f t -> Stepper r f t
 stepper syncf event = Stepper (cachedTerm, event)
   where
   cachedTerm = cached (lift syncf)
@@ -134,7 +134,7 @@ stepper syncf event = Stepper (cachedTerm, event)
 -- value.
 applyStepper
   :: forall r f s t .
-     ( Functor f )
+     ( Monoid r, Functor f )
   => Stepper r f (s -> t)
   -> Event r f s
   -> Event r f t
@@ -154,7 +154,7 @@ applyStepper ~(Stepper (initial, step)) event =
   later = fmap (\f -> fmap f event) step
 
 infixl 4 <@>
-(<@>) :: Functor f => Stepper r f (s -> t) -> Event r f s -> Event r f t
+(<@>) :: ( Monoid r, Functor f ) => Stepper r f (s -> t) -> Event r f s -> Event r f t
 (<@>) = applyStepper
 
 -- TBD is this single-step presentation sufficient to do all that lovely
@@ -203,8 +203,8 @@ liftSyncF = liftF
 
 liftWriterSync
   :: ( Functor f )
-  => WriterT [r] f t
-  -> WriterT [r] (SyncF f) t
+  => WriterT r f t
+  -> WriterT r (SyncF f) t
 liftWriterSync = WriterT . liftSyncF . runWriterT
 
 -- | A SyncF can be injected into IO by using an Embedding.
@@ -238,84 +238,68 @@ data Delay r f t where
 instance Functor (Event r f) where
   fmap = mapEvent
 
-instance Functor f => Applicative (Event r f) where
+instance ( Monoid r, Functor f ) => Applicative (Event r f) where
   pure = pureEvent
   -- NB the applicative and monad instances for Event r f are consistent; we
   -- do *not* use (<*>) = applyEvents as that function introduces
   -- concurrency.
   (<*>) = ap
 
-instance Functor f => Monad (Event r f) where
+instance ( Monoid r, Functor f ) => Monad (Event r f) where
   return = pure
   (>>=) = andThen
 
-instance (Functor f) => Alternative (Event r f) where
+instance ( Monoid r, Functor f ) => Alternative (Event r f) where
   empty = never
   left <|> right = unionEvents const left right
 
 -- |
 -- = Composing events monadically
 --
---   do t <- someExistingEvent
---      -- The computation in now should be cached as one unit.
---      -- Breaking it up should be fine, i.e. now should be observably
---      -- homomorphic:
---      --   now (f `join` g) = now f `join` now g
---      -- although operationally it's different as there will be more cache
---      -- entries in the latter.
---      r <- now $ do x <- lift someSpecialAppComputation
---                    _ <- tell [x]
---                    pure x
---      fmap ((,) r) someOtherExistingEvent
---
---  The issue is that, in order to make that cached thing, we need some IO.
---  Perhaps instead we should use stable names for the cache? Suppose we did.
---  We do. It's great.
---
---
 --
 
-now :: ( Functor f ) => WriterT [r] f t -> Event r f t
+now :: ( Monoid r, Functor f ) => WriterT r f t -> Event r f t
 now writer = immediate term
   where
   term = WriterT (liftSyncF (runWriterT writer))
 
 immediate
   :: forall r f t .
-     ( )
-  => WriterT [r] (SyncF f) t
+     ( Monoid r )
+  => WriterT r (SyncF f) t
   -> Event r f t
 immediate term =
-  let term' :: WriterT [r] (SyncF f) (Either t (Delay r f t))
+  let term' :: WriterT r (SyncF f) (Either t (Delay r f t))
       term' = fmap Left term
   in  Event (cached term')
 
-delayed :: Delay r f t -> Event r f t
+delayed :: ( Monoid r ) => Delay r f t -> Event r f t
 delayed = Event . pure . Right
 
 fromDelay
   :: forall r f t .
-     Delay r f t
+     ( Monoid r )
+  => Delay r f t
   -> Event r f t
 fromDelay delay = Event (pure (Right delay))
 
-never :: Event r f t
+never :: ( Monoid r ) => Event r f t
 never = Event $ pure (Right indefiniteDelay)
 
 indefiniteDelay :: Delay r f t
 indefiniteDelay = Delay LVault.empty
 
-repeatIndefinitely :: ( Functor f ) => Event r f t -> Event r f x
+repeatIndefinitely :: ( Monoid r, Functor f ) => Event r f t -> Event r f x
 repeatIndefinitely event =
   let event' = switchEvent (mapEvent (const event') event)
   in  event'
 
-emit :: Functor f => r -> Event r f ()
-emit r = immediate (tell [r])
+emit :: ( Monoid r ) => r -> Event r f ()
+emit r = immediate (tell r)
 
 -- | Monadic bind for events.
 andThen
-  :: ( Functor f )
+  :: ( Monoid r, Functor f )
   => Event r f s
   -> (s -> Event r f t)
   -> Event r f t
@@ -323,20 +307,20 @@ andThen ev next = switchEvent (mapEvent next ev)
 
 pureEvent
   :: forall r f t .
-     ( )
+     ( Monoid r )
   => t
   -> Event r f t
 pureEvent t = Event $ pure (Left t)
 
 commuteEvent
   :: forall r g x y f t .
-     ( )
+     ( Monoid r )
   => Event r g (Now x y f t)
   -> Now x y f (Event r g t)
 commuteEvent event = Now $ do
   nowEnv <- ask
   -- clear Now using nowEnv and inject the IO into the cached computation.
-  let k :: Now x y f t -> WriterT [r] (SyncF g) t
+  let k :: Now x y f t -> WriterT r (SyncF g) t
       k now = lift (liftSyncIO (runReaderT (runNow now) nowEnv))
   -- mapEventF will cache the k-computation.
   pure (mapEventF k event)
@@ -353,7 +337,7 @@ mapDelay f (Delay pulses) = Delay pulses'
 -- | Bind a cached computation through an event.
 mapEventCached
   :: forall r f s t .
-     ( )
+     ( Monoid r )
   => (s -> Cached r (SyncF f) t)
   -> Event r f s
   -> Event r f t
@@ -365,7 +349,7 @@ mapEventCached k event = Event $ do
 
 mapDelayCached
   :: forall r f s t .
-     ( )
+     ( Monoid r )
   => (s -> Cached r (SyncF f) t)
   -> Delay r f s
   -> Delay r f t
@@ -377,8 +361,8 @@ mapDelayCached k (Delay pulses) = Delay pulses'
 -- | Cache a computation and bind it through an event.
 mapEventF
   :: forall r f s t .
-     ( )
-  => (s -> WriterT [r] (SyncF f) t)
+     ( Monoid r )
+  => (s -> WriterT r (SyncF f) t)
   -> Event r f s
   -> Event r f t
 mapEventF k event =
@@ -413,7 +397,7 @@ transDelay trans (Delay pulses) = Delay pulses'
 
 switchEvent
   :: forall r f t .
-     ( Functor f )
+     ( Monoid r, Functor f )
   => Event r f (Event r f t)
   -> Event r f t
 switchEvent event = Event $ do
@@ -424,7 +408,7 @@ switchEvent event = Event $ do
 
 switchDelay
   :: forall r f t .
-     ( Functor f )
+     ( Monoid r, Functor f )
   => Delay r f (Event r f t)
   -> Delay r f t
 switchDelay (Delay pulses) = Delay pulses'
@@ -433,12 +417,13 @@ switchDelay (Delay pulses) = Delay pulses'
   pulses' = fmap switchEvent pulses
 
 infixl 4 >*<
-(>*<) :: forall r f s t . Event r f (s -> t) -> Event r f s -> Event r f t
+(>*<) :: forall r f s t . ( Monoid r ) => Event r f (s -> t) -> Event r f s -> Event r f t
 (>*<) = applyEvents
 
 applyEvents
   :: forall r f s t .
-     Event r f (s -> t)
+     ( Monoid r )
+  => Event r f (s -> t)
   -> Event r f s
   -> Event r f t
 applyEvents evf evx = Event $ do
@@ -458,7 +443,7 @@ applyEvents evf evx = Event $ do
 
 applyDelays
   :: forall r f s t .
-     ( )
+     ( Monoid r )
   => Delay r f (s -> t)
   -> Delay r f s
   -> Delay r f t
@@ -497,7 +482,7 @@ applyDelays df@(Delay pulsesf) dx@(Delay pulsesx) =
 --
 unionEvents
   :: forall r f t .
-     ( Functor f )
+     ( Monoid r, Functor f )
   => (t -> t -> t)
   -> Event r f t
   -> Event r f t
@@ -516,7 +501,7 @@ unionEvents disambiguate evl evr = Event $ do
 
 unionDelays
   :: forall r f t .
-     ( Functor f )
+     ( Monoid r, Functor f )
   => (t -> t -> t)
   -> Delay r f t
   -> Delay r f t
@@ -580,7 +565,7 @@ recomposePulses left right both = fmap recompose
     PDBoth l r -> both l r
 
 semigroupUnionEvents
-  :: ( Functor f, Semigroup t )
+  :: ( Functor f, Monoid r, Semigroup t )
   => Event r f t
   -> Event r f t
   -> Event r f t
@@ -588,8 +573,8 @@ semigroupUnionEvents = unionEvents (<>)
 
 factorEvent
   :: forall r q f s t .
-     ( )
-  => ([r] -> Either (Event r f s) s -> Event q f t)
+     ( Monoid r, Monoid q )
+  => (r -> Either (Event r f s) s -> Event q f t)
   -> Event r f s
   -> Event q f t
 factorEvent k event = Event $ do
@@ -599,8 +584,8 @@ factorEvent k event = Event $ do
     Right (Delay pulses) -> pure (Right (Delay (fmap (k rs . Left) pulses)))
 
 nextSemigroup
-  :: ( Functor f, Semigroup r )
-  => Event r f t
+  :: ( Functor f, Semigroup r, Monoid q )
+  => Event [r] f t
   -> Event q f r
 nextSemigroup = factorEvent $ \rs choice -> case nonEmpty rs of
   Just ne -> pure (sconcat ne)
@@ -609,7 +594,7 @@ nextSemigroup = factorEvent $ \rs choice -> case nonEmpty rs of
     Right _ -> never
 
 data NowEnv r f t = NowEnv {
-    nowChan :: Chan ([r], Maybe t)
+    nowChan :: Chan (r, Maybe t)
   , nowEval :: MVar (Delay r f t, Embedding f IO)
   }
 
@@ -624,20 +609,23 @@ deriving instance Monad (Now r q f)
 sync :: IO t -> Now r q f t
 sync io = Now $ ReaderT $ \_ -> io
 
-async :: Functor f => IO t -> Now r q f (Event x f t)
+async :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x f t)
 async io = do
   (ev, cb) <- primEvent
   _ <- sync $ do result <- Async.async (io >>= cb)
                  Async.link result
   pure ev
 
-asyncOS :: Functor f => IO t -> Now r q f (Event x f t)
+asyncOS :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x f t)
 asyncOS io = do
   (ev, cb) <- primEvent
   sync (Async.withAsyncBound (io >>= cb) (const (pure ev)))
 
 -- | A primitive event and a function to fire it.
-primEvent :: forall r q x f t . Functor f => Now r q f (Event x f t, t -> IO ())
+primEvent
+  :: forall r q x f t .
+     ( Monoid r, Monoid x, Functor f )
+  => Now r q f (Event x f t, t -> IO ())
 primEvent = Now $ ReaderT $ \nowEnv -> do
   domainKey :: LVault.DomainKey t <- LVault.newDomainKey
   let pulse :: t -> Event x f t
@@ -657,9 +645,9 @@ primEvent = Now $ ReaderT $ \nowEnv -> do
                         putMVar (nowEval nowEnv) stuff
                       Just (computation :: t -> Event r f q) -> do
                         let Event cached = computation t
-                            syncf :: SyncF f (Either q (Delay r f q), [r])
+                            syncf :: SyncF f (Either q (Delay r f q), r)
                             syncf = runWriterT (runCached cached)
-                            statet :: StateT (Embedding f IO) IO (Either q (Delay r f q), [r])
+                            statet :: StateT (Embedding f IO) IO (Either q (Delay r f q), r)
                             statet = embedSyncF syncf
                         ((choice' :: Either q (Delay r f q), rs), embedding')
                           <- runStateT statet embedding
@@ -675,11 +663,11 @@ primEvent = Now $ ReaderT $ \nowEnv -> do
   pure (event, cb)
 
 
-newtype Network r q = Network (Chan ([r], Maybe q))
+newtype Network r q = Network (Chan (r, Maybe q))
 
 reactimate
   :: forall r q f .
-     ( Monad f )
+     ( Monoid r, Monad f )
   => Embedding f IO
   -> Now r q f (Event r f q)
   -> IO (Network r q)
@@ -701,7 +689,7 @@ reactimate embedding (Now runIt) = do
 
 runNetwork
   :: Network r q
-  -> ([r] -> IO ()) -- ^ Respond to the side-channel.
+  -> (r -> IO ()) -- ^ Respond to the side-channel.
   -> (q -> IO z)    -- ^ Respond to the final value.
   -> IO z           -- ^ Respond to a lock-up: no more events will fire.
   -> IO z
@@ -709,7 +697,7 @@ runNetwork network k f g = catch (runNetwork_ network k f) $
   -- Blocked indefinitely on an mvar means the network is stuck.
   \(e :: BlockedIndefinitelyOnMVar) -> g
 
-runNetwork_ :: Network r q -> ([r] -> IO ()) -> (q -> IO z) -> IO z
+runNetwork_ :: Network r q -> (r -> IO ()) -> (q -> IO z) -> IO z
 runNetwork_ network@(Network chan) k f = do
   -- We don't want this readChan to cause the runtime to kill the thread, in
   -- case for instance the network is exhausted and there are no more references
