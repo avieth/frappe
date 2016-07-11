@@ -593,6 +593,51 @@ nextSemigroup = factorEvent $ \rs choice -> case nonEmpty rs of
     Left event' -> nextSemigroup event'
     Right _ -> never
 
+newtype Accumulator r f t = Accumulator {
+    getAccumulator :: Event r f (t, Maybe (Accumulator r f t))
+  }
+
+accumulate
+  :: forall r f s t .
+     ( Functor f, Monoid r )
+  => (s -> Maybe (Accumulator r f s) -> Event r f t)
+  -> Accumulator r f s
+  -> Event r f t
+accumulate k acc = do
+  (t, next) <- getAccumulator acc
+  k t next
+
+-- | Take the final value of an accumulator. It's done when the accumulator
+--   input event is done.
+accumulateAll
+  :: ( Functor f, Monoid r )
+  => Accumulator r f t
+  -> Event r f t
+accumulateAll = accumulate $ \t next -> case next of
+  Nothing -> pure t
+  Just acc -> accumulateAll acc
+
+-- | Repeatedly apply the side-channel output of some event to an initial
+--   value.
+accumulator
+  :: forall f r t anything .
+     ( Functor f, Monoid r )
+  => t
+  -> Event (Option (Last (t -> t))) f anything
+  -> Accumulator r f t
+accumulator acc event = Accumulator $ flip factorEvent event $ \r choice -> case r of
+  Option Nothing -> case choice of
+    Right _ -> pure (acc, Nothing)
+    Left event' -> getAccumulator (accumulator acc event')
+  Option (Just (Last f)) -> case choice of
+    Right _ -> pure (f acc, Nothing)
+    Left event' -> pure (acc', Just next)
+      where
+      acc' :: t
+      acc' = f acc
+      next :: Accumulator r f t
+      next = accumulator acc' event'
+
 data NowEnv r f t = NowEnv {
     nowChan :: Chan (r, Maybe t)
   , nowEval :: MVar (Delay r f t, Embedding f IO)
