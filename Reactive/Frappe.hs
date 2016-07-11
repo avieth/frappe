@@ -28,6 +28,10 @@ module Reactive.Frappe (
   , repeatIndefinitely
   , commuteEvent
   , transEvent
+  , emit
+
+  , factorEvent
+  , nextSemigroup
 
   , Stepper
   , stepper
@@ -68,6 +72,7 @@ import Control.Monad.Cached
 import qualified Data.Vault.Lambda as LVault
 import Data.Bifunctor (bimap)
 import Data.Semigroup
+import Data.List.NonEmpty
 
 -- |
 -- = Sampler
@@ -304,6 +309,9 @@ repeatIndefinitely :: ( Functor f ) => Event r f t -> Event r f x
 repeatIndefinitely event =
   let event' = switchEvent (mapEvent (const event') event)
   in  event'
+
+emit :: Functor f => r -> Event r f ()
+emit r = immediate (tell [r])
 
 -- | Monadic bind for events.
 andThen
@@ -578,24 +586,27 @@ semigroupUnionEvents
   -> Event r f t
 semigroupUnionEvents = unionEvents (<>)
 
--- This may prove *very* useful: get an event which fires whenever the side
--- channel *or* the final value fires. If the side channel fires, give the
--- continuation.
---
--- NB it's always immediate! Is that a problem?
 factorEvent
-  :: forall r q f t .
+  :: forall r q f s t .
      ( )
+  => ([r] -> Either (Event r f s) s -> Event q f t)
+  -> Event r f s
+  -> Event q f t
+factorEvent k event = Event $ do
+  (choice, rs) <- withResidues (unEvent event)
+  case choice of
+    Left s -> unEvent (k rs (Right s))
+    Right (Delay pulses) -> pure (Right (Delay (fmap (k rs . Left) pulses)))
+
+nextSemigroup
+  :: ( Functor f, Semigroup r )
   => Event r f t
-  -> Event q f (Either (Delay r f t, [r]) (t, [r]))
-factorEvent event = event'
-  where
-  event' :: Event q f (Either (Delay r f t, [r]) (t, [r]))
-  event' = Event $ do
-    (choice, rs) <- withResidues (unEvent event)
-    case choice of
-      Left t -> pure (Left (Right (t, rs)))
-      Right (delay :: Delay r f t) -> pure (Left (Left (delay, rs)))
+  -> Event q f r
+nextSemigroup = factorEvent $ \rs choice -> case nonEmpty rs of
+  Just ne -> pure (sconcat ne)
+  Nothing -> case choice of
+    Left event' -> nextSemigroup event'
+    Right _ -> never
 
 data NowEnv r f t = NowEnv {
     nowChan :: Chan ([r], Maybe t)
