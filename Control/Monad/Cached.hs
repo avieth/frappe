@@ -34,24 +34,27 @@ import System.Mem.StableName
 import Unsafe.Coerce
 import GHC.Exts (Any)
 
--- Must use StateT (Cache r f) (WriterT [r] f t)
--- i.e. cache the written things, so we can do withResidues.
+type Key r (f :: * -> *) t = WriterT [r] f t
+type Value r (f :: * -> *) t = (t, [r])
 
-type Key (f :: * -> *) t = f t
-type Value (f :: * -> *) t = t
+type Cache r (f :: * -> *) = HM.HashMap Int [Any]
 
-type Cache (f :: * -> *) = HM.HashMap Int [Any]
+fromAny :: Any -> t
+fromAny = unsafeCoerce
 
-emptyCache :: Cache f
+toAny :: t -> Any
+toAny = unsafeCoerce
+
+emptyCache :: Cache r f
 emptyCache = HM.empty
 
-insertCache :: Key f t -> Value f t -> Cache f -> IO (Cache f)
+insertCache :: Key r f t -> Value r f t -> Cache r f -> IO (Cache r f)
 insertCache key value cache = do
   sn <- makeStableName key
   let snh = hashStableName sn
   pure $ HM.insertWith (++) snh [unsafeCoerce (sn, value) :: Any] cache
 
-checkCache :: forall f t . Key f t -> Cache f -> IO (Maybe (Value f t))
+checkCache :: forall r f t . Key r f t -> Cache r f -> IO (Maybe (Value r f t))
 checkCache key cache = do
   sn <- makeStableName key
   let snh = hashStableName sn
@@ -62,9 +65,9 @@ checkCache key cache = do
   where
 
   checkCacheBucket
-    :: StableName (Key f t)
-    -> [(StableName (Key f t), Value f t)]
-    -> Maybe (Value f t)
+    :: StableName (Key r f t)
+    -> [(StableName (Key r f t), Value r f t)]
+    -> Maybe (Value r f t)
   checkCacheBucket sn lst = case lst of
     [] -> Nothing
     (sn', v) : rest ->
@@ -77,7 +80,7 @@ checkCache key cache = do
 --   This makes Cached r f *not* a monad, but it gives the desired semantics
 --   when wielded appropriately to define events.
 newtype Cached (r :: *) (f :: * -> *) (t :: *) = Cached {
-    getCached :: WriterT [r] (StateT (Cache f) f) t
+    getCached :: StateT (Cache r f) (WriterT [r] f) t
   }
 
 deriving instance Functor f => Functor (Cached r f)
@@ -89,44 +92,47 @@ runCached
      ( Monad f )
   => Cached r f t
   -> WriterT [r] f t
-runCached (Cached (WriterT stateT)) = WriterT (evalStateT stateT emptyCache)
+runCached (Cached stateT) = evalStateT stateT emptyCache
 
 transCached
   :: forall r f g t .
      (forall t . f t -> g t)
   -> Cached r f t
   -> Cached r g t
-transCached trans (Cached (WriterT (StateT mkfterm))) =
-  Cached (WriterT (StateT (fmap trans mkfterm)))
+transCached trans (Cached (StateT mkwriterterm)) =
+  Cached (StateT (fmap transWriter mkwriterterm))
+  where
+  transWriter (WriterT fterm) = WriterT (trans fterm)
 
 cached
   :: forall r f t.
      ( MonadIO f )
   => WriterT [r] f t
   -> Cached r f t
-cached term = Cached $ WriterT $ do
+cached term = Cached $ do
   cache <- get
-  value :: Maybe t <- lift . liftIO $ checkCache term cache
+  value :: Maybe (t, [r]) <- liftIO $ checkCache term cache
   case value of
-    Just t -> pure (t, [])
+    -- Cache hit. Lift t in but ignore the writer output, as we don't want
+    -- to make duplicate writes.
+    Just (t, _) -> lift (pure t)
+    -- Cache miss. Run the term and cache it.
     Nothing -> do
-      out :: (t, [r]) <- lift (runWriterT term)
-      cache' <- lift . liftIO $ insertCache term (fst out) cache
+      out :: (t, [r]) <- lift (listen term)
+      cache' <- liftIO $ insertCache term out cache
       _ <- put cache'
-      pure out
+      lift (pure (fst out))
 
--- | Cache a complete cached computation.
+-- | Include a complete cached computation and obtain its writer output.
 withResidues
-  :: ( MonadIO f )
+  :: forall r s f t .
+     ( MonadIO f )
   => Cached r f t
   -> Cached s f (t, [r])
-withResidues (Cached (WriterT term)) = Cached $ WriterT $ do
+withResidues (Cached statet) = Cached $ do
   cache <- get
-  value <- lift . liftIO $ checkCache term cache
-  case value of
-    Just t -> pure (t, [])
-    Nothing -> do
-      out <- term
-      cache' <- lift . liftIO $ insertCache term out cache
-      _ <- put cache'
-      pure (out, [])
+  let fterm :: f ((t, Cache r f), [r])
+      fterm = runWriterT (runStateT statet cache)
+  ((t, cache'), rs) <- lift (lift fterm)
+  _ <- put cache'
+  pure (t, rs)

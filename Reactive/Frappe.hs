@@ -92,7 +92,7 @@ instance Functor (Sampler r f) where
 
 -- | Construct a sampler from some IO computation.
 sampler :: IO t -> Sampler r f t
-sampler io = Sampler (cached liftSyncIO (lift (lift io)))
+sampler io = Sampler (cached (lift (lift io)))
 
 -- | Sample a Sampler when some event fires.
 sample :: Sampler r f (s -> t) -> Event r f s -> Event r f t
@@ -122,7 +122,7 @@ instance Functor (Stepper r f) where
 stepper :: SyncF f t -> Event r f t -> Stepper r f t
 stepper syncf event = Stepper (cachedTerm, event)
   where
-  cachedTerm = cached liftSyncIO (lift syncf)
+  cachedTerm = cached (lift syncf)
 
 -- If the stepper's event fires strictly before the second event, use the
 -- resulting function when the second event fires; otherwise, use the initial
@@ -283,7 +283,7 @@ immediate
 immediate term =
   let term' :: WriterT [r] (SyncF f) (Either t (Delay r f t))
       term' = fmap Left term
-  in  Event (cached liftSyncIO term')
+  in  Event (cached term')
 
 delayed :: Delay r f t -> Event r f t
 delayed = Event . pure . Right
@@ -379,7 +379,7 @@ mapEventF k event =
   -- Is it true that the Kleisli arrow @k@ will be run at most once for every
   -- event trigger? Well, sure: whenever the event known here as @event@ is
   -- run.
-  mapEventCached (cached liftSyncIO . k) event
+  mapEventCached (cached . k) event
 
 transEvent
   :: forall r f g t .
@@ -619,7 +619,6 @@ async io = do
   _ <- sync $ do result <- Async.async (io >>= cb)
                  Async.link result
   pure ev
-  --sync (Async.withAsync (io >>= cb) (const (pure ev)))
 
 asyncOS :: Functor f => IO t -> Now r q f (Event x f t)
 asyncOS io = do
@@ -631,11 +630,11 @@ primEvent :: forall r q x f t . Functor f => Now r q f (Event x f t, t -> IO ())
 primEvent = Now $ ReaderT $ \nowEnv -> do
   domainKey :: LVault.DomainKey t <- LVault.newDomainKey
   let pulse :: t -> Event x f t
-      pulse = \t -> Event (cached liftSyncIO (pure (Left t)))
+      pulse = \t -> Event (cached (pure (Left t)))
       thisPulses :: Pulses x f t
       thisPulses = LVault.insert domainKey pulse LVault.empty
       event :: Event x f t
-      event = Event (cached liftSyncIO (pure (Right (Delay thisPulses))))
+      event = Event (cached (pure (Right (Delay thisPulses))))
   -- When the event fires, we grab the top-level event and check whether
   -- this event determines a computation for it. If it does, we recover a
   -- function  t -> f ((), Event f ())
