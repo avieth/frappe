@@ -28,10 +28,14 @@ module Control.Monad.Cached (
 import Control.Monad.Trans.Writer.Strict
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Class (lift)
+import Control.Monad.IO.Class
 import qualified Data.HashMap.Strict as HM
 import System.Mem.StableName
 import Unsafe.Coerce
 import GHC.Exts (Any)
+
+-- Must use StateT (Cache r f) (WriterT [r] f t)
+-- i.e. cache the written things, so we can do withResidues.
 
 type Key (f :: * -> *) t = f t
 type Value (f :: * -> *) t = t
@@ -97,11 +101,10 @@ transCached trans (Cached (WriterT (StateT mkfterm))) =
 
 cached
   :: forall r f t.
-     ( Monad f )
-  => (forall t . IO t -> f t)
-  -> WriterT [r] f t
+     ( MonadIO f )
+  => WriterT [r] f t
   -> Cached r f t
-cached liftIO term = Cached $ WriterT $ do
+cached term = Cached $ WriterT $ do
   cache <- get
   value :: Maybe t <- lift . liftIO $ checkCache term cache
   case value of
@@ -112,8 +115,18 @@ cached liftIO term = Cached $ WriterT $ do
       _ <- put cache'
       pure out
 
+-- | Cache a complete cached computation.
 withResidues
-  :: ( Monad f )
+  :: ( MonadIO f )
   => Cached r f t
   -> Cached s f (t, [r])
-withResidues (Cached (WriterT term)) = Cached (lift term)
+withResidues (Cached (WriterT term)) = Cached $ WriterT $ do
+  cache <- get
+  value <- lift . liftIO $ checkCache term cache
+  case value of
+    Just t -> pure (t, [])
+    Nothing -> do
+      out <- term
+      cache' <- lift . liftIO $ insertCache term out cache
+      _ <- put cache'
+      pure (out, [])
