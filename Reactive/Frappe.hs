@@ -63,7 +63,7 @@ module Reactive.Frappe (
   ) where
 
 import Control.Applicative
-import Control.Monad (ap)
+import Control.Monad (ap, join)
 import Control.Exception
 import Control.Concurrent
 import qualified Control.Concurrent.Async as Async
@@ -110,58 +110,23 @@ applyStepper
   => Stepper r f (s -> t)
   -> Event r f s
   -> Event r f t
-applyStepper ~(Stepper (initial, step)) event =
+applyStepper ~(Stepper (initial, step)) event = join (sooner <|> later)
   -- We race two events:
   --   - @sooner@ fires when @event@ fires, giving an immediate event with the
-  --     initial function applies to its value.
+  --     initial function applied to its value.
   --   - @later@ fires when @step@ fires, giving @event@ with the now known
   --     function applied.
   -- In case of coincidence, we take sooner (the original value of the
   -- stepper).
-  switchEvent (unionEvents const sooner later)
   where
   sooner :: Event r f (Event r f t)
-  sooner = fmap pure <$> Event (fmap Left initial) >*< event
+  sooner = fmap pure <$> Event (fmap Left initial) <*> event
   later :: Event r f (Event r f t)
-  later = fmap (\f -> fmap f event) step
+  later = fmap (\f -> applyStepper (stepper (pure f) step) event) step
 
 infixl 4 <@>
 (<@>) :: ( Monoid r, Functor f ) => Stepper r f (s -> t) -> Event r f s -> Event r f t
 (<@>) = applyStepper
-
--- TBD is this single-step presentation sufficient to do all that lovely
--- classical reactive programming?
-
--- Stores functions from pulses (primitives events) to some value.
--- Running an event (primEvent callback) will check the pulses of the top-level
--- event using its own domain key. If it's present, then it will recover the
--- f computation to run to produce a value and the next event.
-type Pulses r f t = LVault.LambdaVault (Event r f t)
-
--- Motivation for the first parameter r... when we bindEvent, we're saying
--- to continue with some synchronous f-computation when the event occurs.
--- If we have Event r f Void then we know that the event will never come to
--- completion; there will always be another delayed part. Since r is there,
--- we still have a way to get data from it. We can't add any further "lateral"
--- f-computation, but we should be able to derive other events from this
--- r side-channel.
---
--- How to deal with this assymmetry, though? Consider event unioning for
--- instance. We can union on the third parameter, that's straightforward. But
--- surely we can also union on the first parameter.
---
--- Ok how's this for justification: the first parameter is cross-thread
--- communication and the third parameter is the final output of the thread.
--- A thread computes some value, but also offers a way to communicate with
--- other threads. Input is expressed by deriving an event from some other
--- thread's first parameter, and output is symmetric (some other thread is
--- derived from this event's first parameter).
---
---   -- If the event never gives an r, then the resulting event is never.
---   communicate
---     :: (NonEmpty r -> Maybe (Event r f t) -> Event s f u)
---     -> Event r f t
---     -> Event s f u
 
 -- | Some @f@ with IO mixed in. @SyncF f@ is a functor whenever @f@ is a
 --   functor.
@@ -214,6 +179,12 @@ deriving instance Applicative (SyncStateT f g h)
 deriving instance Monad (SyncStateT f g h)
 instance MonadTrans (SyncStateT f g) where
   lift = SyncStateT . lift . lift
+
+-- Stores functions from pulses (primitives events) to some value.
+-- Running an event (primEvent callback) will check the pulses of the top-level
+-- event using its own domain key. If it's present, then it will recover the
+-- f computation to run to produce a value and the next event.
+type Pulses r f t = LVault.LambdaVault (Event r f t)
 
 -- | TODO explain this.
 newtype Event (r :: *) (f :: * -> *) (t :: *) = Event {
