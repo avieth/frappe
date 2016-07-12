@@ -46,6 +46,13 @@ module Reactive.Frappe (
   , SyncF
 
   , Now
+  , syncNow
+  , asyncNow
+  , asyncOSNow
+  , primEventNow
+
+  , React
+  , embedReact
   , sync
   , async
   , asyncOS
@@ -63,6 +70,7 @@ import Control.Exception
 import Control.Concurrent
 import qualified Control.Concurrent.Async as Async
 import Control.Monad.Embedding
+import Control.Monad.IO.Class
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Free.Church
@@ -258,10 +266,8 @@ instance ( Monoid r, Functor f ) => Alternative (Event r f) where
 --
 --
 
-now :: ( Monoid r, Functor f ) => WriterT r f t -> Event r f t
-now writer = immediate term
-  where
-  term = WriterT (liftSyncF (runWriterT writer))
+now :: ( Monoid r, Functor f ) => f t -> Event r f t
+now term = immediate (lift (liftSyncF term))
 
 immediate
   :: forall r f t .
@@ -638,8 +644,8 @@ accumulator acc event = Accumulator $ flip factorEvent event $ \r choice -> case
       next :: Accumulator r f t
       next = accumulator acc' event'
 
-data NowEnv r f t = NowEnv {
-    nowChan :: Chan (r, Maybe t)
+data NowEnv (r :: *) (f :: * -> *) (t :: *) = NowEnv {
+    nowChan :: Chan (r, Maybe t) -- ^ Dump outputs here
   , nowEval :: MVar (Delay r f t, Embedding f IO)
   }
 
@@ -651,37 +657,70 @@ deriving instance Functor (Now r q f)
 deriving instance Applicative (Now r q f)
 deriving instance Monad (Now r q f)
 
-sync :: IO t -> Now r q f t
-sync io = Now $ ReaderT $ \_ -> io
+newtype React (t :: *) = React {
+    runReact :: forall r q f . ( Monoid r, Functor f ) => Now r q f t
+  }
 
-async :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x f t)
-async io = do
-  (ev, cb) <- primEvent
-  _ <- sync $ do result <- Async.async (io >>= cb)
-                 Async.link result
+deriving instance Functor React
+
+instance Applicative React where
+  pure x = React $ pure x
+  React mf <*> React mx = React $ mf <*> mx
+
+instance Monad React where
+  return = pure
+  React x >>= k = React $ x >>= runReact . k
+
+embedNow :: NowEnv r f q -> Embedding (Now r q f) IO
+embedNow nowEnv =
+  let embedding = Embedding $ \(Now reader) -> do
+        out <- runReaderT reader nowEnv
+        pure (out, embedding)
+  in  embedding
+
+embedReact :: forall r q f . (Monoid r, Functor f) => Embedding React (Now r q f)
+embedReact = Embedding $ \react -> fmap (flip (,) embedReact) (runReact react)
+
+syncNow :: IO t -> Now r q f t
+syncNow io = Now $ ReaderT $ \_ -> io
+
+sync :: IO t -> React t
+sync io = React $ syncNow io
+
+asyncNow :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x g t)
+asyncNow io = do
+  (ev, cb) <- primEventNow
+  _ <- syncNow $ do result <- Async.async (io >>= cb)
+                    Async.link result
   pure ev
 
-asyncOS :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x f t)
-asyncOS io = do
-  (ev, cb) <- primEvent
-  sync (Async.withAsyncBound (io >>= cb) (const (pure ev)))
+async :: ( Monoid x ) => IO t -> React (Event x f t)
+async io = React $ asyncNow io
+
+asyncOSNow :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x g t)
+asyncOSNow io = do
+  (ev, cb) <- primEventNow
+  syncNow (Async.withAsyncBound (io >>= cb) (const (pure ev)))
+
+asyncOS :: ( Monoid x ) => IO t -> React (Event x f t)
+asyncOS io = React $ asyncOSNow io
 
 -- | A primitive event and a function to fire it.
-primEvent
-  :: forall r q x f t .
+primEventNow
+  :: forall r q x f g t .
      ( Monoid r, Monoid x, Functor f )
-  => Now r q f (Event x f t, t -> IO ())
-primEvent = Now $ ReaderT $ \nowEnv -> do
+  => Now r q f (Event x g t, t -> IO ())
+primEventNow = Now $ ReaderT $ \nowEnv -> do
   domainKey :: LVault.DomainKey t <- LVault.newDomainKey
-  let pulse :: t -> Event x f t
+  let pulse :: t -> Event x g t
       pulse = \t -> Event (cached (pure (Left t)))
-      thisPulses :: Pulses x f t
+      thisPulses :: Pulses x g t
       thisPulses = LVault.insert domainKey pulse LVault.empty
-      event :: Event x f t
+      event :: Event x g t
       event = Event (cached (pure (Right (Delay thisPulses))))
   -- When the event fires, we grab the top-level event and check whether
-  -- this event determines a computation for it. If it does, we recover a
-  -- function  t -> f ((), Event f ())
+  -- this event determines a computation for it. If it does, run it to
+  -- come up with output and the next event.
   let cb = \t -> do stuff@(Delay pulses, embedding)
                       <- takeMVar (nowEval nowEnv)
                     case LVault.lookup domainKey pulses of
@@ -707,36 +746,45 @@ primEvent = Now $ ReaderT $ \nowEnv -> do
                         pure ()
   pure (event, cb)
 
+primEvent :: ( Monoid x ) => React (Event x f t, t -> IO ())
+primEvent = React primEventNow
 
 newtype Network r q = Network (Chan (r, Maybe q))
 
+-- | Use an embedding of f into Now to create an event network.
 reactimate
   :: forall r q f .
      ( Monoid r, Monad f )
-  => Embedding f IO
-  -> Now r q f (Event r f q)
+  => (forall r q g . (Monoid r, Functor g) => Embedding f (Now r q g))
+  -> f (Event r f q)
   -> IO (Network r q)
-reactimate embedding (Now runIt) = do
+reactimate fembedding fterm = do
   chan <- newChan
   mvar <- newEmptyMVar
   let nowEnv = NowEnv chan mvar
-  Event cached <- runReaderT runIt nowEnv
+  let nowembedding = embedNow nowEnv
+  let embedding :: Embedding f IO
+      embedding = nowembedding `composeEmbedding` fembedding
+  (Event cached, embedding') <- runEmbedding embedding fterm
   let syncf = runWriterT (runCached cached)
+      statet :: StateT (Embedding f IO) IO (Either q (Delay r f q), r)
       statet = embedSyncF syncf
-  ((choice, rs), embedding') <- runStateT statet embedding
+  ((choice, rs), embedding'') <- runStateT statet embedding'
   case choice of
     Left done -> do
       writeChan chan (rs, Just done)
     Right delay -> do
-      _ <- putMVar mvar (delay, embedding')
+      _ <- putMVar mvar (delay, embedding'')
       writeChan chan (rs, Nothing)
   pure (Network chan)
 
+-- | Use a reactive network to do IO whenever its side channel fires, whenever
+--   its output fires, and whenever it is determined to have stalled.
 runNetwork
   :: Network r q
   -> (r -> IO ()) -- ^ Respond to the side-channel.
-  -> (q -> IO z)    -- ^ Respond to the final value.
-  -> IO z           -- ^ Respond to a lock-up: no more events will fire.
+  -> (q -> IO z)  -- ^ Respond to the final value.
+  -> IO z         -- ^ Respond to a lock-up: no more events will fire.
   -> IO z
 runNetwork network k f g = catch (runNetwork_ network k f) $
   -- Blocked indefinitely on an mvar means the network is stuck.

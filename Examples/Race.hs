@@ -23,17 +23,16 @@ import Reactive.Frappe
 
 main = do
 
-  let networkDescription :: Now r q Identity (Event x Identity Bool)
+  let networkDescription :: React (Event () React Bool)
       networkDescription = do
         evTrue <- async $ threadDelay 500000 >> pure True
         evFalse <- async $ threadDelay 1000000 >> pure False
         pure $ (evTrue <|> evFalse)
 
-  let sideChannel :: [Void] -> IO ()
-      sideChannel [] = pure ()
-      sideChannel (x : _) = absurd x
+  let sideChannel :: () -> IO ()
+      sideChannel _ = pure ()
 
-  network <- reactimate embedding networkDescription
+  network <- reactimate embedReact networkDescription
   outcome <- runNetwork network
                         -- Fires whenever the side-channel fires (event not
                         -- necessarily done).
@@ -43,7 +42,3 @@ main = do
 
   -- The network delivers a Bool when it's done. Let's print it.
   print outcome
-
-  where
-
-  embedding = embedIdentity
