@@ -18,7 +18,7 @@ Portability : non-portable (GHC only)
 
 module Reactive.Frappe (
 
-    Event
+    Event(..)
   , never
   , now
   , applyEvents
@@ -36,11 +36,6 @@ module Reactive.Frappe (
   , stepper
   , applyStepper
   , (<@>)
-
-  , Sampler
-  , sampler
-  , sample
-  , (<!>)
 
   , SyncF
 
@@ -68,54 +63,16 @@ import Control.Exception
 import Control.Concurrent
 import qualified Control.Concurrent.Async as Async
 import Control.Monad.Embedding
-import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Free.Church
 import Control.Monad.Trans.Writer.Strict
 import Control.Monad.Trans.State
 import Control.Monad.Cached
-import qualified Data.Vault.Lambda as LVault
 import Data.Bifunctor (bimap)
 import Data.Semigroup
 import Data.List.NonEmpty
-
--- |
--- = Sampler
---
--- A sampler is an immediate event which can be constructed from a term which
--- includes IO. This allows us to express something like a pull-based behavior:
--- a reactive-banana behavior which is computed when it's sampled, rather than
--- only updated when an event fires. The IO will be run at most once when an
--- event fires. A great use case is for the DOM: sampling an element's
--- dimensions as needed, rather than fumbling to try and keep them up to date
--- in terms of steppers (not sure how to do that in a sane way).
-
--- TBD
--- Sampler may be obsolete now too. Just express the IO in your functor and
--- run it in the embedding.
-
--- | An f with IO computation. The Event in here is always an immediate.
---
---   Can only be constructed by @sampler@, and only used by @sample@.
-newtype Sampler r f t = Sampler {
-    unSampler :: Cached r (SyncF f) t
-  }
-
-instance Functor (Sampler r f) where
-  fmap f = Sampler . fmap f . unSampler
-
--- | Construct a sampler from some IO computation.
-sampler :: ( Monoid r ) => IO t -> Sampler r f t
-sampler io = Sampler (cached (lift (lift io)))
-
--- | Sample a Sampler when some event fires.
-sample :: ( Monoid r ) => Sampler r f (s -> t) -> Event r f s -> Event r f t
-sample (Sampler cached) = mapEventCached (\t -> cached <*> pure t)
-
-infixl 4 <!>
-(<!>) :: ( Monoid r ) => Sampler r f (s -> t) -> Event r f s -> Event r f t
-(<!>) = sample
+import qualified Data.Vault.Lambda as LVault
 
 -- |
 -- = Stepper (classical behaviors)
@@ -203,19 +160,11 @@ type Pulses r f t = LVault.LambdaVault (Event r f t)
 
 -- | Some @f@ with IO mixed in. @SyncF f@ is a functor whenever @f@ is a
 --   functor.
+--   IO is there for the benefit of Cached. It means that SyncF f is MonadIO.
 type SyncF f = FT f IO
-
-liftSyncIO :: IO t -> SyncF f t
-liftSyncIO = lift
 
 liftSyncF :: ( Functor f ) => f t -> SyncF f t
 liftSyncF = liftF
-
-liftWriterSync
-  :: ( Functor f )
-  => WriterT r f t
-  -> WriterT r (SyncF f) t
-liftWriterSync = WriterT . liftSyncF . runWriterT
 
 -- | A SyncF can be injected into IO by using an Embedding.
 embedSyncF
@@ -261,12 +210,7 @@ deriving instance Monad (SyncStateT f g h)
 instance MonadTrans (SyncStateT f g) where
   lift = SyncStateT . lift . lift
 
--- Is this the good presentation? It allows us to express
---
---   1. Immediate events, giving a good candidate for Applicative's pure.
---   2. A side channel which can also be immediate.
---
---
+-- | TODO explain this.
 newtype Event (r :: *) (f :: * -> *) (t :: *) = Event {
     unEvent :: Cached r (SyncF f) (Either t (Delay r f t))
   }
@@ -292,11 +236,15 @@ instance ( Monoid r, Functor f ) => Alternative (Event r f) where
   empty = never
   left <|> right = unionEvents const left right
 
+instance ( Monoid r ) => MonadTrans (Event r) where
+  lift = Event . cached . lift . liftF . fmap Left
+
 -- |
 -- = Composing events monadically
 --
 --
 
+-- | Like lift but better, because it doesn't have the Monad f constraint.
 now :: ( Monoid r, Functor f ) => f t -> Event r f t
 now term = immediate (lift (liftSyncF term))
 
