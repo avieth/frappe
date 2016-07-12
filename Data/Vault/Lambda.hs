@@ -35,12 +35,16 @@ data SomeFunction t where
 instance Functor SomeFunction where
   fmap f (SomeFunction g) = SomeFunction (f . g)
 
-newtype LambdaVault t = LambdaVault (HM.HashMap Unique (SomeFunction t))
+newtype LambdaVault t = LambdaVault {
+    getLambdaVault :: HM.HashMap Unique (SomeFunction t)
+  }
 
 instance Functor LambdaVault where
   fmap = lvMap
 
-newtype DomainKey s = DomainKey Unique
+newtype DomainKey s = DomainKey {
+    getDomainKey :: Unique
+  }
 
 newDomainKey :: forall s . IO (DomainKey s)
 newDomainKey = DomainKey <$> newUnique
@@ -49,20 +53,20 @@ empty :: forall t . LambdaVault t
 empty = LambdaVault HM.empty
 
 lookup :: forall s t . DomainKey s -> LambdaVault t -> Maybe (s -> t)
-lookup (DomainKey d) (LambdaVault hm) = case HM.lookup d hm of
+lookup d lv = case HM.lookup (getDomainKey d) (getLambdaVault lv) of
   Nothing -> Nothing
   Just (SomeFunction f) -> Just (unsafeCoerce f)
 
 insert :: forall s t . DomainKey s -> (s -> t) -> LambdaVault t -> LambdaVault t
-insert (DomainKey d) f (LambdaVault hm) = LambdaVault $
-  HM.insert d (SomeFunction f) hm
+insert d f lv = LambdaVault $
+  HM.insert (getDomainKey d) (SomeFunction f) (getLambdaVault lv)
 
 lvMap :: forall s t . (s -> t) -> LambdaVault s -> LambdaVault t
-lvMap f (LambdaVault hm) = LambdaVault $ fmap (fmap f) hm
+lvMap f lv = LambdaVault $ fmap (fmap f) (getLambdaVault lv)
 
 union :: forall t . (t -> t -> t) -> LambdaVault t -> LambdaVault t -> LambdaVault t
-union f (LambdaVault hml) (LambdaVault hmr) = LambdaVault $
-  HM.unionWith f' hml hmr
+union f lvl lvr = LambdaVault $
+  HM.unionWith f' (getLambdaVault lvl) (getLambdaVault lvr)
   where
   -- It's known here that the functions l, r have the same domain, for they
   -- are found at the same key in the LambdaVault map!
