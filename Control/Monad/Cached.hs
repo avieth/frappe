@@ -41,12 +41,6 @@ type Value r (f :: * -> *) t = (t, r)
 
 type Cache r (f :: * -> *) = HM.HashMap Int [Any]
 
-fromAny :: Any -> t
-fromAny = unsafeCoerce
-
-toAny :: t -> Any
-toAny = unsafeCoerce
-
 emptyCache :: Cache r f
 emptyCache = HM.empty
 

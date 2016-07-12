@@ -32,6 +32,11 @@ module Reactive.Frappe (
   , factorEvent
   , nextSemigroup
 
+  , Accumulator
+  , accumulator
+  , accumulate
+  , accumulateAll
+
   , Stepper
   , stepper
   , applyStepper
@@ -258,16 +263,6 @@ immediate term =
       term' = fmap Left term
   in  Event (cached term')
 
-delayed :: ( Monoid r ) => Delay r f t -> Event r f t
-delayed = Event . pure . Right
-
-fromDelay
-  :: forall r f t .
-     ( Monoid r )
-  => Delay r f t
-  -> Event r f t
-fromDelay delay = Event (pure (Right delay))
-
 never :: ( Monoid r ) => Event r f t
 never = Event $ pure (Right indefiniteDelay)
 
@@ -306,44 +301,6 @@ mapDelay f (Delay pulses) = Delay pulses'
   pulses' :: Pulses r f t
   pulses' = fmap (mapEvent f) pulses
 
--- | Bind a cached computation through an event.
-mapEventCached
-  :: forall r f s t .
-     ( Monoid r )
-  => (s -> Cached r (SyncF f) t)
-  -> Event r f s
-  -> Event r f t
-mapEventCached k event = Event $ do
-  choice <- unEvent event
-  case choice of
-    Left t -> fmap Left (k t)
-    Right delay -> pure (Right (mapDelayCached k delay))
-
-mapDelayCached
-  :: forall r f s t .
-     ( Monoid r )
-  => (s -> Cached r (SyncF f) t)
-  -> Delay r f s
-  -> Delay r f t
-mapDelayCached k (Delay pulses) = Delay pulses'
-  where
-  pulses' :: Pulses r f t
-  pulses' = fmap (mapEventCached k) pulses
-
--- | Cache a computation and bind it through an event.
-mapEventF
-  :: forall r f s t .
-     ( Monoid r )
-  => (s -> WriterT r (SyncF f) t)
-  -> Event r f s
-  -> Event r f t
-mapEventF k event =
-  -- We use the same key for every term which comes out of the k.
-  -- I suspect this is OK but I am not sure.
-  -- Is it true that the Kleisli arrow @k@ will be run at most once for every
-  -- event trigger? Well, sure: whenever the event known here as @event@ is
-  -- run.
-  mapEventCached (cached . k) event
 
 transEvent
   :: forall r f g t .
@@ -765,7 +722,7 @@ runNetwork
   -> IO z
 runNetwork network k f g = catch (runNetwork_ network k f) $
   -- Blocked indefinitely on an mvar means the network is stuck.
-  \(e :: BlockedIndefinitelyOnMVar) -> g
+  \(_ :: BlockedIndefinitelyOnMVar) -> g
 
 runNetwork_ :: Network r q -> (r -> IO ()) -> (q -> IO z) -> IO z
 runNetwork_ network@(Network chan) k f = do
