@@ -318,19 +318,6 @@ pureEvent
   -> Event r f t
 pureEvent t = Event $ pure (Left t)
 
-commuteEvent
-  :: forall r g x y f t .
-     ( Monoid r )
-  => Event r g (Now x y f t)
-  -> Now x y f (Event r g t)
-commuteEvent event = Now $ do
-  nowEnv <- ask
-  -- clear Now using nowEnv and inject the IO into the cached computation.
-  let k :: Now x y f t -> WriterT r (SyncF g) t
-      k now = lift (liftSyncIO (runReaderT (runNow now) nowEnv))
-  -- mapEventF will cache the k-computation.
-  pure (mapEventF k event)
-
 mapEvent :: forall r f s t . (s -> t) -> Event r f s -> Event r f t
 mapEvent f event = Event $ fmap (bimap f (mapDelay f)) (unEvent event)
 
