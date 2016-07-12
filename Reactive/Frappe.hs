@@ -26,7 +26,6 @@ module Reactive.Frappe (
   , unionEvents
   , semigroupUnionEvents
   , repeatIndefinitely
-  , commuteEvent
   , transEvent
   , emit
 
@@ -52,7 +51,6 @@ module Reactive.Frappe (
   , primEventNow
 
   , React
-  , embedReact
   , sync
   , async
   , asyncOS
@@ -71,7 +69,7 @@ import Control.Concurrent
 import qualified Control.Concurrent.Async as Async
 import Control.Monad.Embedding
 import Control.Monad.IO.Class
-import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Free.Church
 import Control.Monad.Trans.Writer.Strict
@@ -92,6 +90,10 @@ import Data.List.NonEmpty
 -- event fires. A great use case is for the DOM: sampling an element's
 -- dimensions as needed, rather than fumbling to try and keep them up to date
 -- in terms of steppers (not sure how to do that in a sane way).
+
+-- TBD
+-- Sampler may be obsolete now too. Just express the IO in your functor and
+-- run it in the embedding.
 
 -- | An f with IO computation. The Event in here is always an immediate.
 --
@@ -223,12 +225,41 @@ embedSyncF
   -> StateT (Embedding f IO) IO t
 embedSyncF = iterTM embed
   where
-  embed :: forall t . f (StateT (Embedding f IO) IO t) -> StateT (Embedding f IO) IO t
+  embed :: forall t . f (StateT (Embedding f IO) IO t)
+        -> StateT (Embedding f IO) IO t
   embed term = do
     embedding <- get
     (t, embedding') <- lift (runEmbedding embedding term)
     _ <- put embedding'
     t
+
+syncFEmbedding
+  :: forall f g .
+     ( Functor f, Functor g )
+  => Embedding f g
+  -> Embedding (SyncF f) (SyncF g)
+syncFEmbedding embedding = Embedding $ \syncf -> do
+  (t, embedding') <- runStateT (runSyncStateT (iterTM embed syncf)) embedding
+  pure (t, syncFEmbedding embedding')
+  where
+  embed :: forall t . f (SyncStateT f g IO t)
+        -> SyncStateT f g IO t
+  embed term = SyncStateT $ do
+    embedding <- get
+    (t, embedding') <- liftF (runEmbedding embedding term)
+    _ <- put embedding'
+    runSyncStateT t
+
+-- | Used to define syncFEmbedding. It's a target for an iterTM on a SyncF.
+newtype SyncStateT f g h t = SyncStateT {
+    runSyncStateT :: StateT (Embedding f g) (FT g h) t
+  }
+
+deriving instance Functor (SyncStateT f g h)
+deriving instance Applicative (SyncStateT f g h)
+deriving instance Monad (SyncStateT f g h)
+instance MonadTrans (SyncStateT f g) where
+  lift = SyncStateT . lift . lift
 
 -- Is this the good presentation? It allows us to express
 --
@@ -368,25 +399,35 @@ mapEventF k event =
 
 transEvent
   :: forall r f g t .
-     ( Functor g )
+     ( Functor f, Functor g, Monoid r )
   => (forall t . f t -> g t)
   -> Event r f t
   -> Event r g t
-transEvent trans event = Event term'
-  where
-  term' :: Cached r (SyncF g) (Either t (Delay r g t))
-  term' = (fmap . fmap) (transDelay trans) (transCached (transFT trans) (unEvent event))
+transEvent trans = embedEvent (naturalEmbedding trans)
 
-transDelay
+embedEvent
   :: forall r f g t .
-     ( Functor g )
-  => (forall t . f t -> g t)
-  -> Delay r f t
-  -> Delay r g t
-transDelay trans (Delay pulses) = Delay pulses'
+     ( Functor f, Functor g, Monoid r )
+  => Embedding f g
+  -> Event r f t
+  -> Event r g t
+embedEvent embedding = embedEvent_ embedding''
   where
-  pulses' :: Pulses r g t
-  pulses' = fmap (transEvent trans) pulses
+  embedding' :: Embedding (SyncF f) (SyncF g)
+  embedding' = syncFEmbedding embedding
+  embedding'' :: Embedding (Cached r (SyncF f)) (Cached r (SyncF g))
+  embedding'' = cachedEmbedding embedding'
+
+  embedEvent_
+    :: Embedding (Cached r (SyncF f)) (Cached r (SyncF g))
+    -> Event r f t
+    -> Event r g t
+  embedEvent_ embedding event = Event $ do
+    (choice, embedding') <- runEmbedding embedding (unEvent event)
+    case choice of
+      Left done -> pure (Left done)
+      Right (Delay pulses) -> pure . Right . Delay $
+        fmap (embedEvent_ embedding') pulses
 
 switchEvent
   :: forall r f t .
@@ -566,7 +607,7 @@ semigroupUnionEvents = unionEvents (<>)
 
 factorEvent
   :: forall r q f s t .
-     ( Monoid r, Monoid q )
+     ( Monoid q )
   => (r -> Either (Event r f s) s -> Event q f t)
   -> Event r f s
   -> Event q f t
@@ -738,11 +779,11 @@ primEvent = React primEventNow
 
 newtype Network r q = Network (Chan (r, Maybe q))
 
--- | Use an embedding of f into Now to create an event network.
+-- | Use an embedding of f into React to create an event network.
 reactimate
   :: forall r q f .
      ( Monoid r, Monad f )
-  => (forall r q g . (Monoid r, Functor g) => Embedding f (Now r q g))
+  => Embedding f React
   -> f (Event r f q)
   -> IO (Network r q)
 reactimate fembedding fterm = do
@@ -751,7 +792,8 @@ reactimate fembedding fterm = do
   let nowEnv = NowEnv chan mvar
   let nowembedding = embedNow nowEnv
   let embedding :: Embedding f IO
-      embedding = nowembedding `composeEmbedding` fembedding
+      embedding = nowembedding `composeEmbedding` embedReact
+                               `composeEmbedding` fembedding
   (Event cached, embedding') <- runEmbedding embedding fterm
   let syncf = runWriterT (runCached cached)
       statet :: StateT (Embedding f IO) IO (Either q (Delay r f q), r)

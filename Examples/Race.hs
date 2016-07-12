@@ -32,7 +32,7 @@ main = do
   let sideChannel :: () -> IO ()
       sideChannel _ = pure ()
 
-  network <- reactimate embedReact networkDescription
+  network <- reactimate idEmbedding networkDescription
   outcome <- runNetwork network
                         -- Fires whenever the side-channel fires (event not
                         -- necessarily done).

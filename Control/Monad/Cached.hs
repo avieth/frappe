@@ -22,6 +22,7 @@ module Control.Monad.Cached (
   , cached
   , transCached
   , withResidues
+  , cachedEmbedding
 
   ) where
 
@@ -29,6 +30,7 @@ import Control.Monad.Trans.Writer.Strict
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.IO.Class
+import Control.Monad.Embedding
 import qualified Data.HashMap.Strict as HM
 import System.Mem.StableName
 import Unsafe.Coerce
@@ -126,7 +128,7 @@ cached term = Cached $ do
 -- | Include a complete cached computation and obtain its writer output.
 withResidues
   :: forall r s f t .
-     ( Monoid r, Monoid s, MonadIO f )
+     ( Monoid s, MonadIO f )
   => Cached r f t
   -> Cached s f (t, r)
 withResidues (Cached statet) = Cached $ do
@@ -136,3 +138,19 @@ withResidues (Cached statet) = Cached $ do
   ((t, cache'), rs) <- lift (lift fterm)
   _ <- put cache'
   pure (t, rs)
+
+cachedEmbedding
+  :: forall r f g .
+     ( Monoid r, Monad g )
+  => Embedding f g
+  -> Embedding (Cached r f) (Cached r g)
+cachedEmbedding embedding = Embedding $ \(Cached statet :: Cached r f t) -> Cached $ do
+  cache <- get
+  let fterm :: f ((t, Cache r f), r)
+      fterm = runWriterT (runStateT statet cache)
+      gterm :: g (((t, Cache r f), r), Embedding f g)
+      gterm = runEmbedding embedding fterm
+  (((t, cache'), rs), embedding') <- lift (lift gterm)
+  _ <- put cache'
+  _ <- lift (tell rs)
+  pure (t, cachedEmbedding embedding')

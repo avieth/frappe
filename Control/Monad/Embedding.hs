@@ -42,6 +42,14 @@ idEmbedding = Embedding $ \f -> do
   t <- f
   pure (t, idEmbedding)
 
+naturalEmbedding
+  :: ( Functor g )
+  => (forall t . f t -> g t)
+  -> Embedding f g
+naturalEmbedding trans = Embedding $ fmap (flip (,) recurse) . trans
+  where
+  recurse = naturalEmbedding trans
+
 embedIdentity :: Applicative g => Embedding Identity g
 embedIdentity = Embedding $ \(Identity t) -> pure (t, embedIdentity)
 
