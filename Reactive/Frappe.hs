@@ -49,6 +49,8 @@ module Reactive.Frappe (
 
   , Stepper(..)
   , stepper
+  , initial
+  , changes
   , applyStepper
   , (<@>)
 
@@ -104,6 +106,12 @@ instance ( Functor f, Monoid r ) => Applicative (Stepper r f) where
 
 stepper :: ( Monoid r ) => t -> Delay r f t -> Stepper r f t
 stepper t delay = Stepper (t, delay)
+
+initial :: Stepper r f t -> t
+initial = fst . getStepper
+
+changes :: Stepper r f t -> Delay r f t
+changes = snd . getStepper
 
 applyStepper
   :: forall r f s t .
