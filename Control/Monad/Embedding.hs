@@ -10,10 +10,12 @@ Portability : non-portable (GHC only)
 
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Control.Monad.Embedding where
 
 import Data.Functor.Identity
+import Data.Functor.Compose
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.State
 import Control.Monad.Trans.Writer
@@ -29,18 +31,22 @@ execEmbedding :: Functor g => Embedding f g -> f t -> g t
 execEmbedding embedding = fmap fst . runEmbedding embedding
 
 composeEmbedding
-  :: ( Monad h )
+  :: forall f g h .
+     ( Functor h )
   => Embedding g h
   -> Embedding f g
   -> Embedding f h
-composeEmbedding (Embedding left) (Embedding right) = Embedding $ \f -> do
-  ((t, right'), left') <- left (right f)
-  pure (t, composeEmbedding left' right')
+composeEmbedding eleft eright = Embedding $ \(f :: f t) ->
+  let g :: g (t, Embedding f g)
+      g = runEmbedding eright f
+      h :: h ((t, Embedding f g), Embedding g h)
+      h = runEmbedding eleft g
+      continue :: ((t, Embedding f g), Embedding g h) -> (t, Embedding f h)
+      continue ((t, eright'), eleft') = (t, composeEmbedding eleft' eright')
+  in  fmap continue h
 
-idEmbedding :: ( Monad f ) => Embedding f f
-idEmbedding = Embedding $ \f -> do
-  t <- f
-  pure (t, idEmbedding)
+idEmbedding :: ( Functor f ) => Embedding f f
+idEmbedding = Embedding $ \f -> fmap (flip (,) idEmbedding) f
 
 naturalEmbedding
   :: ( Functor g )
@@ -52,6 +58,22 @@ naturalEmbedding trans = Embedding $ fmap (flip (,) recurse) . trans
 
 embedIdentity :: Applicative g => Embedding Identity g
 embedIdentity = Embedding $ \(Identity t) -> pure (t, embedIdentity)
+
+embedComposeL
+  :: ( Functor g, Functor h )
+  => Embedding f g
+  -> Embedding (Compose f h) (Compose g h)
+embedComposeL embedding = Embedding $ \(Compose fh) -> Compose $
+  let continue = \(h, embedding') -> fmap (flip (,) (embedComposeL embedding')) h
+  in  fmap continue (runEmbedding embedding fh)
+
+embedComposeR
+  :: ( Functor g, Functor h )
+  => Embedding f g
+  -> Embedding (Compose h f) (Compose h g)
+embedComposeR embedding = Embedding $ \(Compose hf) -> Compose $
+  let continue = \(t, embedding') -> (t, embedComposeR embedding')
+  in  fmap (fmap continue . runEmbedding embedding) hf
 
 embedReaderT :: Monad m => r -> Embedding (ReaderT r m) m
 embedReaderT r = Embedding $ \readerT -> do
