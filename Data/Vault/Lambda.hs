@@ -35,11 +35,13 @@ data SomeFunction t where
 instance Functor SomeFunction where
   fmap f (SomeFunction g) = SomeFunction (f . g)
 
-newtype LambdaVault t = LambdaVault {
+-- | Phantom parameter p so that LambdaVault has the same kind as other maps,
+--   and can therefore be used with MapAlgebra.
+newtype LambdaVault p t = LambdaVault {
     getLambdaVault :: HM.HashMap Unique (SomeFunction t)
   }
 
-instance Functor LambdaVault where
+instance Functor (LambdaVault p) where
   fmap = lvMap
 
 newtype DomainKey s = DomainKey {
@@ -49,22 +51,22 @@ newtype DomainKey s = DomainKey {
 newDomainKey :: forall s . IO (DomainKey s)
 newDomainKey = DomainKey <$> newUnique
 
-empty :: forall t . LambdaVault t
+empty :: forall p t . LambdaVault p t
 empty = LambdaVault HM.empty
 
-lookup :: forall s t . DomainKey s -> LambdaVault t -> Maybe (s -> t)
+lookup :: forall p s t . DomainKey s -> LambdaVault p t -> Maybe (s -> t)
 lookup d lv = case HM.lookup (getDomainKey d) (getLambdaVault lv) of
   Nothing -> Nothing
   Just (SomeFunction f) -> Just (unsafeCoerce f)
 
-insert :: forall s t . DomainKey s -> (s -> t) -> LambdaVault t -> LambdaVault t
+insert :: forall p s t . DomainKey s -> (s -> t) -> LambdaVault p t -> LambdaVault p t
 insert d f lv = LambdaVault $
   HM.insert (getDomainKey d) (SomeFunction f) (getLambdaVault lv)
 
-lvMap :: forall s t . (s -> t) -> LambdaVault s -> LambdaVault t
+lvMap :: forall p s t . (s -> t) -> LambdaVault p s -> LambdaVault p t
 lvMap f lv = LambdaVault $ fmap (fmap f) (getLambdaVault lv)
 
-union :: forall t . (t -> t -> t) -> LambdaVault t -> LambdaVault t -> LambdaVault t
+union :: forall p t . (t -> t -> t) -> LambdaVault p t -> LambdaVault p t -> LambdaVault p t
 union f lvl lvr = LambdaVault $
   HM.unionWith f' (getLambdaVault lvl) (getLambdaVault lvr)
   where

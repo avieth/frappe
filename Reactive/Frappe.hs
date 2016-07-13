@@ -18,7 +18,7 @@ Portability : non-portable (GHC only)
 
 module Reactive.Frappe (
 
-    Event(..)
+    Event
   , never
   , now
   , applyEvents
@@ -32,12 +32,19 @@ module Reactive.Frappe (
   , factorEvent
   , nextSemigroup
 
+  , Delay
+  , delayed
+  , andThen
+  , switchDelay
+  , unionDelays
+  , applyDelays
+
   , Accumulator
   , accumulator
   , accumulate
   , accumulateAll
 
-  , Stepper
+  , Stepper(..)
   , stepper
   , applyStepper
   , (<@>)
@@ -78,54 +85,52 @@ import Data.Bifunctor (bimap)
 import Data.Semigroup
 import Data.List.NonEmpty
 import qualified Data.Vault.Lambda as LVault
+import Data.MapAlgebra
 
 -- |
--- = Stepper (classical behaviors)
---
--- How can we simulate the classical behavior?
--- Imagine an event where the functor has a ReaderT r over it. Whenever it runs
--- it has access to some value, but it cannot change that value.
--- If we could somehow control the embedding via some other event...
---
+-- = Stepper (classical behavior)
 
--- | A single-step function.
 newtype Stepper r f t = Stepper {
-    getStepper :: (Cached r (SyncF f) t, Event r f t)
+    getStepper :: (t, Delay r f t)
   }
 
-instance Functor (Stepper r f) where
-  fmap f (Stepper (initial, next)) = Stepper (fmap f initial, fmap f next)
+instance ( Monoid r ) => Functor (Stepper r f) where
+  fmap f ~(Stepper (initial, next)) = Stepper (f initial, fmap f next)
 
-stepper :: ( Monoid r ) => SyncF f t -> Event r f t -> Stepper r f t
-stepper syncf event = Stepper (cachedTerm, event)
-  where
-  cachedTerm = cached (lift syncf)
+instance ( Functor f, Monoid r ) => Applicative (Stepper r f) where
+  pure t = Stepper (t, indefiniteDelay)
+  ~(Stepper (f, delayf)) <*> ~(Stepper (x, delayx)) = Stepper $
+    (y, fmap snd (unionDelays unioner delayf' delayx'))
+    where
+    unioner ((f, _), _) ((_, x), _) = ((f, x), f x)
+    delayf' = fmap (\f -> ((f, x), f x)) delayf
+    delayx' = fmap (\x -> ((f, x), f x)) delayx
+    y = f x
 
--- If the stepper's event fires strictly before the second event, use the
--- resulting function when the second event fires; otherwise, use the initial
--- value.
+stepper :: ( Monoid r ) => t -> Delay r f t -> Stepper r f t
+stepper t delay = Stepper (t, delay)
+
 applyStepper
   :: forall r f s t .
      ( Monoid r, Functor f )
   => Stepper r f (s -> t)
-  -> Event r f s
-  -> Event r f t
-applyStepper ~(Stepper (initial, step)) event = join (sooner <|> later)
-  -- We race two events:
-  --   - @sooner@ fires when @event@ fires, giving an immediate event with the
-  --     initial function applied to its value.
-  --   - @later@ fires when @step@ fires, giving @event@ with the now known
-  --     function applied.
-  -- In case of coincidence, we take sooner (the original value of the
-  -- stepper).
+  -> Delay r f s
+  -> Delay r f t
+applyStepper ~(Stepper (f, step)) delay =
+  mergeDelays merger step delay
   where
-  sooner :: Event r f (Event r f t)
-  sooner = fmap pure <$> Event (fmap Left initial) <*> event
-  later :: Event r f (Event r f t)
-  later = fmap (\f -> applyStepper (stepper (pure f) step) event) step
+  merger
+    :: Either (s -> t) (Delay r f (s -> t))
+    -> Either s (Delay r f s)
+    -> Either t (Delay r f t)
+  merger cf cx = case (cf, cx) of
+    (Left f', Left x) -> Left (f' x)
+    (Left f', Right x) -> Right (applyStepper (stepper f' step) x)
+    (Right _, Left x) -> Left (f x)
+    (Right f', Right x) -> Right (applyStepper (stepper f f') x)
 
 infixl 4 <@>
-(<@>) :: ( Monoid r, Functor f ) => Stepper r f (s -> t) -> Event r f s -> Event r f t
+(<@>) :: ( Monoid r, Functor f ) => Stepper r f (s -> t) -> Delay r f s -> Delay r f t
 (<@>) = applyStepper
 
 -- | Some @f@ with IO mixed in. @SyncF f@ is a functor whenever @f@ is a
@@ -184,17 +189,24 @@ instance MonadTrans (SyncStateT f g) where
 -- Running an event (primEvent callback) will check the pulses of the top-level
 -- event using its own domain key. If it's present, then it will recover the
 -- f computation to run to produce a value and the next event.
-type Pulses r f t = LVault.LambdaVault (Event r f t)
+type Pulses p r f t = MapAlgebra LVault.LambdaVault p (Event r f t)
+
+newtype Delay r f t = Delay {
+    getDelay :: forall p . Pulses p r f t
+  }
+
+instance ( Monoid r ) => Functor (Delay r f) where
+  fmap = mapDelay
+
+delayed :: ( Monoid r ) => Delay r f t -> Event r f t
+delayed = Event . cached . pure . Right
 
 -- | TODO explain this.
 newtype Event (r :: *) (f :: * -> *) (t :: *) = Event {
     unEvent :: Cached r (SyncF f) (Either t (Delay r f t))
   }
 
-data Delay r f t where
-  Delay :: Pulses r f t -> Delay r f t
-
-instance Functor (Event r f) where
+instance ( Monoid r ) => Functor (Event r f) where
   fmap = mapEvent
 
 instance ( Monoid r, Functor f ) => Applicative (Event r f) where
@@ -206,7 +218,7 @@ instance ( Monoid r, Functor f ) => Applicative (Event r f) where
 
 instance ( Monoid r, Functor f ) => Monad (Event r f) where
   return = pure
-  (>>=) = andThen
+  ev >>= k = switchEvent (mapEvent k ev)
 
 instance ( Monoid r, Functor f ) => Alternative (Event r f) where
   empty = never
@@ -235,10 +247,10 @@ immediate term =
   in  Event (cached term')
 
 never :: ( Monoid r ) => Event r f t
-never = Event $ pure (Right indefiniteDelay)
+never = Event . cached $ pure (Right indefiniteDelay)
 
 indefiniteDelay :: Delay r f t
-indefiniteDelay = Delay LVault.empty
+indefiniteDelay = Delay (Literal LVault.empty)
 
 repeatIndefinitely :: ( Monoid r, Functor f ) => Event r f t -> Event r f x
 repeatIndefinitely event =
@@ -248,30 +260,38 @@ repeatIndefinitely event =
 emit :: ( Monoid r ) => r -> Event r f ()
 emit r = immediate (tell r)
 
--- | Monadic bind for events.
 andThen
   :: ( Monoid r, Functor f )
-  => Event r f s
+  => Delay r f s
   -> (s -> Event r f t)
-  -> Event r f t
-andThen ev next = switchEvent (mapEvent next ev)
+  -> Delay r f t
+andThen delay k = Delay $ Fmap (>>= k) (getDelay delay)
 
 pureEvent
   :: forall r f t .
      ( Monoid r )
   => t
   -> Event r f t
-pureEvent t = Event $ pure (Left t)
+pureEvent t = Event . cached $ pure (Left t)
 
-mapEvent :: forall r f s t . (s -> t) -> Event r f s -> Event r f t
+mapEvent
+  :: forall r f s t .
+     ( Monoid r )
+  => (s -> t)
+  -> Event r f s
+  -> Event r f t
 mapEvent f event = Event $ fmap (bimap f (mapDelay f)) (unEvent event)
 
-mapDelay :: forall r f s t . (s -> t) -> Delay r f s -> Delay r f t
-mapDelay f (Delay pulses) = Delay pulses'
+mapDelay
+  :: forall r f s t .
+     ( Monoid r )
+  => (s -> t)
+  -> Delay r f s
+  -> Delay r f t
+mapDelay f delay = Delay pulses
   where
-  pulses' :: Pulses r f t
-  pulses' = fmap (mapEvent f) pulses
-
+  pulses :: Pulses p r f t
+  pulses = Fmap (mapEvent f) (getDelay delay)
 
 transEvent
   :: forall r f g t .
@@ -279,8 +299,10 @@ transEvent
   => (forall t . f t -> g t)
   -> Event r f t
   -> Event r g t
-transEvent trans = embedEvent (naturalEmbedding trans)
+transEvent trans e = undefined
+--transEvent trans = embedEvent (naturalEmbedding trans)
 
+{-
 embedEvent
   :: forall r f g t .
      ( Functor f, Functor g, Monoid r )
@@ -303,7 +325,8 @@ embedEvent embedding = embedEvent_ embedding''
     case choice of
       Left done -> pure (Left done)
       Right (Delay pulses) -> pure . Right . Delay $
-        fmap (embedEvent_ embedding') pulses
+        Fmap (embedEvent_ embedding') pulses
+-}
 
 switchEvent
   :: forall r f t .
@@ -321,9 +344,9 @@ switchDelay
      ( Monoid r, Functor f )
   => Delay r f (Event r f t)
   -> Delay r f t
-switchDelay (Delay pulses) = Delay pulses'
+switchDelay ~(Delay pulses) = Delay pulses'
   where
-  pulses' :: Pulses r f t
+  pulses' :: Pulses p r f t
   pulses' = fmap switchEvent pulses
 
 infixl 4 >*<
@@ -337,8 +360,8 @@ applyEvents
   -> Event r f s
   -> Event r f t
 applyEvents evf evx = Event $ do
-  mf :: Either (s -> t) (Delay r f (s -> t)) <- unEvent evf
-  mx :: Either s (Delay r f s) <- unEvent evx
+  mf :: Either (s -> t) (Delay r f (s -> t)) <- (unEvent evf)
+  mx :: Either s (Delay r f s) <- (unEvent evx)
   pure $ case (mf, mx) of
 
     (Left f, Left x) -> Left (f x)
@@ -357,26 +380,26 @@ applyDelays
   => Delay r f (s -> t)
   -> Delay r f s
   -> Delay r f t
-applyDelays df@(Delay pulsesf) dx@(Delay pulsesx) =
+applyDelays ~df@(Delay pulsesf) ~dx@(Delay pulsesx) =
   Delay pulses'
   where
 
-  decomposed :: LVault.LambdaVault (PulseDecomp (Event r f (s -> t)) (Event r f s))
+  decomposed :: MapAlgebra LVault.LambdaVault p (PulseDecomp (Event r f (s -> t)) (Event r f s))
   decomposed = decomposePulses pulsesf pulsesx
 
-  pulses' :: Pulses r f t
+  pulses' :: Pulses p r f t
   pulses' = recomposePulses handleLeft handleRight handleBoth decomposed
 
   handleLeft :: Event r f (s -> t) -> Event r f t
   handleLeft event = Event $ do
-    choice <- unEvent event
+    choice <- (unEvent event)
     case choice of
       Left f -> pure (Right (Delay (fmap (mapEvent f) pulsesx)))
       Right delay -> pure (Right (applyDelays delay dx))
 
   handleRight :: Event r f s -> Event r f t
   handleRight event = Event $ do
-    choice <- unEvent event
+    choice <- (unEvent event)
     case choice of
       Left x -> pure (Right (Delay (fmap (mapEvent (flip ($) x)) pulsesf)))
       Right delay -> pure (Right (applyDelays df delay))
@@ -411,37 +434,60 @@ unionEvents disambiguate evl evr = Event $ do
 
 unionDelays
   :: forall r f t .
-     ( Monoid r, Functor f )
+     ( Monoid r )
   => (t -> t -> t)
   -> Delay r f t
   -> Delay r f t
   -> Delay r f t
-unionDelays disambiguate dl@(Delay pulsesl) dr@(Delay pulsesr) =
-  Delay pulses'
+unionDelays disambiguate = mergeDelays merger
+  where
+  merger :: Either t (Delay r f t) -> Either t (Delay r f t) -> Either t (Delay r f t)
+  merger left right = case (left, right) of
+    -- Both delays finish simultaneously.
+    (Left tl, Left tr) -> Left (disambiguate tl tr)
+    -- The left delay has finished but the right has not.
+    (Left tl, Right _) -> Left tl
+    -- The right delay has finished but the left has not.
+    (Right _, Left tr) -> Left tr
+    -- Some delay has fired but neither has finished.
+    (Right dl, Right dr) -> Right (unionDelays disambiguate dl dr)
+
+-- | Combine two delays by indicating how to continue when either or both of
+--   them fire. The merger function is called with the final value or the
+--   latest continuation for both delays.
+--   Check out @unionDelays@ and @applyStepper@ for examples of use.
+mergeDelays
+  :: forall x f s t r .
+     ( Monoid x )
+  => (Either s (Delay x f s) -> Either t (Delay x f t) -> Either r (Delay x f r))
+  -> Delay x f s
+  -> Delay x f t
+  -> Delay x f r
+mergeDelays merger delays delayt = Delay pulses
+
   where
 
-  decomposed :: LVault.LambdaVault (PulseDecomp (Event r f t) (Event r f t))
-  decomposed = decomposePulses pulsesl pulsesr
+  decomposed :: MapAlgebra LVault.LambdaVault p (PulseDecomp (Event x f s) (Event x f t))
+  decomposed = decomposePulses (getDelay delays) (getDelay delayt)
 
-  pulses' :: Pulses r f t
-  pulses' = recomposePulses handleLeft handleRight handleBoth decomposed
+  pulses :: Pulses p x f r
+  pulses = recomposePulses handleLeft handleRight handleBoth decomposed
 
-  handleLeft :: Event r f t -> Event r f t
+  handleLeft :: Event x f s -> Event x f r
   handleLeft event = Event $ do
     choice <- unEvent event
-    case choice of
-      Left l -> pure (Left l)
-      Right delay -> pure (Right (unionDelays disambiguate delay dr))
+    pure (merger choice (Right delayt))
 
-  handleRight :: Event r f t -> Event r f t
+  handleRight :: Event x f t -> Event x f r
   handleRight event = Event $ do
     choice <- unEvent event
-    case choice of
-      Left r -> pure (Left r)
-      Right delay -> pure (Right (unionDelays disambiguate dl delay))
+    pure (merger (Right delays) choice)
 
-  handleBoth :: Event r f t -> Event r f t -> Event r f t
-  handleBoth = unionEvents disambiguate
+  handleBoth :: Event x f s -> Event x f t -> Event x f r
+  handleBoth events eventt = Event $ do
+    choices <- unEvent events
+    choicet <- unEvent eventt
+    pure (merger choices choicet)
 
 data PulseDecomp l r where
   PDLeft :: l -> PulseDecomp l r
@@ -449,13 +495,13 @@ data PulseDecomp l r where
   PDBoth :: l -> r -> PulseDecomp l r
 
 decomposePulses
-  :: Pulses x f l
-  -> Pulses x f r
-  -> LVault.LambdaVault (PulseDecomp (Event x f l) (Event x f r))
-decomposePulses lefts rights = LVault.union unioner lefts' rights'
+  :: Pulses p x f l
+  -> Pulses p x f r
+  -> MapAlgebra LVault.LambdaVault p (PulseDecomp (Event x f l) (Event x f r))
+decomposePulses lefts rights = Union unioner lefts' rights'
   where
-  lefts' = fmap PDLeft lefts
-  rights' = fmap PDRight rights
+  lefts' = Fmap PDLeft lefts
+  rights' = Fmap PDRight rights
   unioner l r = case (l, r) of
     (PDLeft l', PDRight r') -> PDBoth l' r'
     -- Shame. How to prove this to GHC?
@@ -465,9 +511,9 @@ recomposePulses
   :: (Event x f l -> Event q f t)
   -> (Event x f r -> Event q f t)
   -> (Event x f l -> Event x f r -> Event q f t)
-  -> LVault.LambdaVault (PulseDecomp (Event x f l) (Event x f r))
-  -> Pulses q f t
-recomposePulses left right both = fmap recompose
+  -> MapAlgebra LVault.LambdaVault p (PulseDecomp (Event x f l) (Event x f r))
+  -> Pulses p q f t
+recomposePulses left right both = Fmap recompose
   where
   recompose term = case term of
     PDLeft l -> left l
@@ -591,45 +637,47 @@ syncNow io = Now $ ReaderT $ \_ -> io
 sync :: IO t -> React t
 sync io = React $ syncNow io
 
-asyncNow :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x g t)
+asyncNow :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Delay x g t)
 asyncNow io = do
   (ev, cb) <- primEventNow
   _ <- syncNow $ do result <- Async.async (io >>= cb)
                     Async.link result
   pure ev
 
-async :: ( Monoid x ) => IO t -> React (Event x f t)
+async :: ( Monoid x ) => IO t -> React (Delay x f t)
 async io = React $ asyncNow io
 
-asyncOSNow :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Event x g t)
+asyncOSNow :: ( Monoid r, Monoid x, Functor f ) => IO t -> Now r q f (Delay x g t)
 asyncOSNow io = do
   (ev, cb) <- primEventNow
   syncNow (Async.withAsyncBound (io >>= cb) (const (pure ev)))
 
-asyncOS :: ( Monoid x ) => IO t -> React (Event x f t)
+asyncOS :: ( Monoid x ) => IO t -> React (Delay x f t)
 asyncOS io = React $ asyncOSNow io
 
 -- | A primitive event and a function to fire it.
 primEventNow
   :: forall r q x f g t .
      ( Monoid r, Monoid x, Functor f )
-  => Now r q f (Event x g t, t -> IO ())
+  => Now r q f (Delay x g t, t -> IO ())
 primEventNow = Now $ ReaderT $ \nowEnv -> do
   domainKey :: LVault.DomainKey t <- LVault.newDomainKey
   let pulse :: t -> Event x g t
       pulse = \t -> Event (cached (pure (Left t)))
-      thisPulses :: Pulses x g t
-      thisPulses = LVault.insert domainKey pulse LVault.empty
-      event :: Event x g t
-      event = Event (cached (pure (Right (Delay thisPulses))))
+      thisPulses :: Pulses p x g t
+      thisPulses = Literal (LVault.insert domainKey pulse LVault.empty)
+      delay :: Delay x g t
+      delay = Delay thisPulses
   -- When the event fires, we grab the top-level event and check whether
   -- this event determines a computation for it. If it does, run it to
   -- come up with output and the next event.
   let cb = \t -> do stuff@(Delay pulses, embedding)
                       <- takeMVar (nowEval nowEnv)
-                    case LVault.lookup domainKey pulses of
+                    (pulsesMap, _) <- runMapAlgebra LVault.empty LVault.union fmap pulses
+                    pulsesMap `seq` (pure ())
+                    case LVault.lookup domainKey pulsesMap of
                       Nothing -> do
-                        --_ <- putStrLn "Event unobserved; squelching"
+                        --trace ("Squelching unobserved event") (pure ())
                         putMVar (nowEval nowEnv) stuff
                       Just (computation :: t -> Event r f q) -> do
                         let Event cached = computation t
@@ -648,9 +696,9 @@ primEventNow = Now $ ReaderT $ \nowEnv -> do
                             _ <- writeChan (nowChan nowEnv) (rs, Nothing)
                             pure ()
                         pure ()
-  pure (event, cb)
+  pure (delay, cb)
 
-primEvent :: ( Monoid x ) => React (Event x f t, t -> IO ())
+primEvent :: ( Monoid x ) => React (Delay x f t, t -> IO ())
 primEvent = React primEventNow
 
 newtype Network r q = Network (Chan (r, Maybe q))
