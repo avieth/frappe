@@ -21,10 +21,10 @@ module Reactive.Frappe (
     Event
   , never
   , now
+  , immediately
   , applyEvents
   , (>*<)
   , unionEvents
-  , semigroupUnionEvents
   , repeatIndefinitely
   , embedEvent
   , transEvent
@@ -34,6 +34,7 @@ module Reactive.Frappe (
   , nextSemigroup
 
   , Delay
+  , indefiniteDelay
   , delayed
   , andThen
   , switchDelay
@@ -50,14 +51,6 @@ module Reactive.Frappe (
   , stepper
   , applyStepper
   , (<@>)
-
-  , SyncF
-
-  , Now
-  , syncNow
-  , asyncNow
-  , asyncOSNow
-  , primEventNow
 
   , React
   , sync
@@ -137,7 +130,8 @@ infixl 4 <@>
 
 -- | Some @f@ with IO mixed in. @SyncF f@ is a functor whenever @f@ is a
 --   functor.
---   IO is there for the benefit of Cached. It means that SyncF f is MonadIO.
+--   IO is there for the benefit of Cached. It means that SyncF f is MonadIO, so
+--   we can create StableNames in it.
 type SyncF f = FT f IO
 
 liftSyncF :: ( Functor f ) => f t -> SyncF f t
@@ -159,6 +153,7 @@ embedSyncF = iterTM embed
     _ <- put embedding'
     t
 
+-- | Any Embedding f g determines an Embedding (SyncF f) (SyncF g)
 syncFEmbedding
   :: forall f g .
      ( Functor f, Functor g )
@@ -187,12 +182,16 @@ deriving instance Monad (SyncStateT f g h)
 instance MonadTrans (SyncStateT f g) where
   lift = SyncStateT . lift . lift
 
--- Stores functions from pulses (primitives events) to some value.
--- Running an event (primEvent callback) will check the pulses of the top-level
--- event using its own domain key. If it's present, then it will recover the
--- f computation to run to produce a value and the next event.
+-- | Stores functions from pulses (primitives events) to some value.
+--   Running an event (primEvent callback) will check the pulses of the
+--   top-level event using its own domain key. If it's present, then it will
+--   recover the f computation to run to produce a value and the next event.
+--
+--   A MapAlgebra is used so that we can union a Pulses p r f t with itself
+--   without diverging.
 type Pulses p r f t = MapAlgebra LVault.LambdaVault p (Event r f t)
 
+-- | An Event r f t which will appear at some time in the future.
 newtype Delay r f t = Delay {
     getDelay :: forall p . Pulses p r f t
   }
@@ -203,7 +202,19 @@ instance ( Monoid r ) => Functor (Delay r f) where
 delayed :: ( Monoid r ) => Delay r f t -> Event r f t
 delayed = Event . cached . pure . Right
 
--- | TODO explain this.
+-- | A Delay which never ends.
+indefiniteDelay :: Delay r f t
+indefiniteDelay = Delay (Literal LVault.empty)
+
+-- | Continue a Delay.
+andThen
+  :: ( Monoid r, Functor f )
+  => Delay r f s
+  -> (s -> Event r f t)
+  -> Delay r f t
+andThen delay k = Delay $ Fmap (>>= k) (getDelay delay)
+
+-- | Some f-computation which may or may not immediately yield a value.
 newtype Event (r :: *) (f :: * -> *) (t :: *) = Event {
     unEvent :: Cached r (SyncF f) (Either t (Delay r f t))
   }
@@ -229,14 +240,17 @@ instance ( Monoid r, Functor f ) => Alternative (Event r f) where
 instance ( Monoid r ) => MonadTrans (Event r) where
   lift = Event . cached . lift . liftF . fmap Left
 
--- |
--- = Composing events monadically
---
---
+-- | An Event which never happens.
+never :: ( Monoid r ) => Event r f t
+never = Event . cached $ pure (Right indefiniteDelay)
 
 -- | Like lift but better, because it doesn't have the Monad f constraint.
 now :: ( Monoid r, Functor f ) => f t -> Event r f t
 now term = immediate (lift (liftSyncF term))
+
+-- | Put out some data on the Event's side-channel.
+emit :: ( Monoid r ) => r -> Event r f ()
+emit r = immediate (tell r)
 
 immediate
   :: forall r f t .
@@ -248,33 +262,25 @@ immediate term =
       term' = fmap Left term
   in  Event (cached term')
 
-never :: ( Monoid r ) => Event r f t
-never = Event . cached $ pure (Right indefiniteDelay)
-
-indefiniteDelay :: Delay r f t
-indefiniteDelay = Delay (Literal LVault.empty)
-
+-- | Repeat an Event again and again, realizing its effects but never a value.
 repeatIndefinitely :: ( Monoid r, Functor f ) => Event r f t -> Event r f x
-repeatIndefinitely event =
-  let event' = switchEvent (mapEvent (const event') event)
-  in  event'
+repeatIndefinitely event = let event' = event >> event' in event'
 
-emit :: ( Monoid r ) => r -> Event r f ()
-emit r = immediate (tell r)
-
-andThen
-  :: ( Monoid r, Functor f )
-  => Delay r f s
-  -> (s -> Event r f t)
-  -> Delay r f t
-andThen delay k = Delay $ Fmap (>>= k) (getDelay delay)
-
+-- | An Event which immediately yields some value.
 pureEvent
   :: forall r f t .
      ( Monoid r )
   => t
   -> Event r f t
 pureEvent t = Event . cached $ pure (Left t)
+
+-- | Like Applicative pure but inside f.
+immediately
+  :: forall r f t .
+     ( Monoid r, Functor f )
+  => f t
+  -> Event r f t
+immediately term = immediate (lift (liftSyncF term))
 
 mapEvent
   :: forall r f s t .
@@ -295,6 +301,7 @@ mapDelay f delay = Delay pulses
   pulses :: Pulses p r f t
   pulses = Fmap (mapEvent f) (getDelay delay)
 
+-- | Use a natural transformation to bring some Event to another functor.
 transEvent
   :: forall r f g t .
      ( Functor f, Functor g, Monoid r )
@@ -303,6 +310,8 @@ transEvent
   -> Event r g t
 transEvent trans = embedEvent (naturalEmbedding trans)
 
+-- | Use an embedding to bring some Event to another functor.
+--   @transEvent@ is a special case of this.
 embedEvent
   :: forall r f g t .
      ( Functor f, Functor g, Monoid r )
@@ -329,6 +338,7 @@ embedEvent embedding = embedEvent_ embedding''
         pulses :: forall p . Pulses p r g t
         pulses = Fmap (embedEvent_ embedding') (getDelay delay)
 
+-- | Monadic join for Events.
 switchEvent
   :: forall r f t .
      ( Monoid r, Functor f )
@@ -351,9 +361,14 @@ switchDelay ~(Delay pulses) = Delay pulses'
   pulses' = fmap switchEvent pulses
 
 infixl 4 >*<
+-- | Parallel event application: effects from both Events are realized
+--   concurrently but the derived Event fires simultaneously with the last
+--   of these two Events to fire.
+--   @applyEvents@ is a synonym.
 (>*<) :: forall r f s t . ( Monoid r ) => Event r f (s -> t) -> Event r f s -> Event r f t
 (>*<) = applyEvents
 
+-- | Parallel Event application. @(>*<)@ is a synonym.
 applyEvents
   :: forall r f s t .
      ( Monoid r )
@@ -375,15 +390,21 @@ applyEvents evf evx = Event $ do
 
     (Right df, Right dx) -> Right (applyDelays df dx)
 
+-- | Like @applyEvents@ aka @(>*<)@ but for Delays.
 applyDelays
   :: forall r f s t .
      ( Monoid r )
   => Delay r f (s -> t)
   -> Delay r f s
   -> Delay r f t
-applyDelays ~df@(Delay pulsesf) ~dx@(Delay pulsesx) =
-  Delay pulses'
+applyDelays df dx = Delay pulses'
   where
+
+  pulsesf :: forall p . Pulses p r f (s -> t)
+  pulsesf = getDelay df
+
+  pulsesx :: forall p . Pulses p r f s
+  pulsesx = getDelay dx
 
   decomposed :: MapAlgebra LVault.LambdaVault p (PulseDecomp (Event r f (s -> t)) (Event r f s))
   decomposed = decomposePulses pulsesf pulsesx
@@ -408,12 +429,8 @@ applyDelays ~df@(Delay pulsesf) ~dx@(Delay pulsesx) =
   handleBoth :: Event r f (s -> t) -> Event r f s -> Event r f t
   handleBoth = applyEvents
 
-
--- Unions the side-channel (first parameter, the r's) and races the final
--- value (third parameter). If they both come simultaneously, the
--- disambiguator goes to work. No disambiguator needed for the side-channel
--- of course, as they're gathered in a list.
---
+-- | Take the first to fire of the two Events. If they fire simultaneously,
+--   use a disambiguating function.
 unionEvents
   :: forall r f t .
      ( Monoid r, Functor f )
@@ -433,6 +450,8 @@ unionEvents disambiguate evl evr = Event $ do
     (Right _, Left tr) -> Left tr
     (Right dl, Right dr) -> Right (unionDelays disambiguate dl dr)
 
+-- | Take the first to fire of the two Delays. If they fire simultaneously,
+--   use a disambiguating function.
 unionDelays
   :: forall r f t .
      ( Monoid r )
@@ -521,13 +540,6 @@ recomposePulses left right both = Fmap recompose
     PDRight r -> right r
     PDBoth l r -> both l r
 
-semigroupUnionEvents
-  :: ( Functor f, Monoid r, Semigroup t )
-  => Event r f t
-  -> Event r f t
-  -> Event r f t
-semigroupUnionEvents = unionEvents (<>)
-
 factorEvent
   :: forall r q f s t .
      ( Monoid q )
@@ -595,11 +607,15 @@ accumulator acc event = Accumulator $ flip factorEvent event $ \r choice -> case
       next :: Accumulator r f t
       next = accumulator acc' event'
 
+-- | A @NowEnv r f t@ contains data necessary to pulse an event network.
 data NowEnv (r :: *) (f :: * -> *) (t :: *) = NowEnv {
     nowChan :: Chan (r, Maybe t) -- ^ Dump outputs here
   , nowEval :: MVar (Delay r f t, Embedding f IO)
+    -- ^ The current continuation (Delay) and embedding.
   }
 
+-- | IO with a @NowEnv r f q@. Primitive event handlers are created in @Now@,
+--   so that a trigger function can use the @NowEnv@ to pulse the network.
 newtype Now (r :: *) (q :: *) (f :: * -> *) (t :: *) = Now {
     runNow :: ReaderT (NowEnv r f q) IO t
   }
@@ -608,6 +624,10 @@ deriving instance Functor (Now r q f)
 deriving instance Applicative (Now r q f)
 deriving instance Monad (Now r q f)
 
+-- | A @Now r q f t@ term which is almost free in @r@ and @q@: the former
+--   must be a @Monoid@ and the latter a @Functor@.
+--
+--   It can do IO via @sync@ and @async@, and can create primitive @Delay@s.
 newtype React (t :: *) = React {
     runReact :: forall r q f . ( Monoid r, Functor f ) => Now r q f t
   }
@@ -635,6 +655,8 @@ embedReact = Embedding $ \react -> fmap (flip (,) embedReact) (runReact react)
 syncNow :: IO t -> Now r q f t
 syncNow io = Now $ ReaderT $ \_ -> io
 
+-- | Do synchronous IO. You probably don't want to do anything that might be
+--   long-running.
 sync :: IO t -> React t
 sync io = React $ syncNow io
 
@@ -645,6 +667,7 @@ asyncNow io = do
                     Async.link result
   pure ev
 
+-- | Do asynchronous IO. The @Delay@ fires when it's done.
 async :: ( Monoid x ) => IO t -> React (Delay x f t)
 async io = React $ asyncNow io
 
@@ -653,6 +676,7 @@ asyncOSNow io = do
   (ev, cb) <- primEventNow
   syncNow (Async.withAsyncBound (io >>= cb) (const (pure ev)))
 
+-- | Do asynchronous IO in an OS thread. The @Delay@ fires when it's done.
 asyncOS :: ( Monoid x ) => IO t -> React (Delay x f t)
 asyncOS io = React $ asyncOSNow io
 
@@ -699,9 +723,11 @@ primEventNow = Now $ ReaderT $ \nowEnv -> do
                         pure ()
   pure (delay, cb)
 
+-- | Get a @Delay@ and a function to pulse it.
 primEvent :: ( Monoid x ) => React (Delay x f t, t -> IO ())
 primEvent = React primEventNow
 
+-- | Represents an active network.
 newtype Network r q = Network (Chan (r, Maybe q))
 
 -- | Use an embedding of f into React to create an event network.
