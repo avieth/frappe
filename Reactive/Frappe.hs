@@ -26,6 +26,7 @@ module Reactive.Frappe (
   , unionEvents
   , semigroupUnionEvents
   , repeatIndefinitely
+  , embedEvent
   , transEvent
   , emit
 
@@ -300,10 +301,8 @@ transEvent
   => (forall t . f t -> g t)
   -> Event r f t
   -> Event r g t
-transEvent trans e = undefined
---transEvent trans = embedEvent (naturalEmbedding trans)
+transEvent trans = embedEvent (naturalEmbedding trans)
 
-{-
 embedEvent
   :: forall r f g t .
      ( Functor f, Functor g, Monoid r )
@@ -325,9 +324,10 @@ embedEvent embedding = embedEvent_ embedding''
     (choice, embedding') <- runEmbedding embedding (unEvent event)
     case choice of
       Left done -> pure (Left done)
-      Right (Delay pulses) -> pure . Right . Delay $
-        Fmap (embedEvent_ embedding') pulses
--}
+      Right delay -> pure (Right (Delay pulses))
+        where
+        pulses :: forall p . Pulses p r g t
+        pulses = Fmap (embedEvent_ embedding') (getDelay delay)
 
 switchEvent
   :: forall r f t .
