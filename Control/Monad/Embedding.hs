@@ -22,6 +22,7 @@ import Control.Monad.Trans.Writer
 import qualified Control.Monad.Trans.Writer.Strict as WS
 import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.Except
+import Control.Monad.Trans.Free.Church
 
 newtype Embedding (f :: * -> *) (g :: * -> *) = Embedding {
     runEmbedding :: forall t . f t -> g (t, Embedding f g)
@@ -74,6 +75,24 @@ embedComposeR
 embedComposeR embedding = Embedding $ \(Compose hf) -> Compose $
   let continue = \(t, embedding') -> (t, embedComposeR embedding')
   in  fmap (fmap continue . runEmbedding embedding) hf
+
+embedComposeInR
+  :: ( Monad g )
+  => Embedding f g
+  -> Embedding (Compose f g) g
+embedComposeInR embedding = Embedding $ \(Compose fg) -> do
+  (g, embedding') <- runEmbedding embedding fg
+  t <- g
+  pure (t, embedComposeInR embedding')
+
+embedComposeInL
+  :: ( Monad f )
+  => Embedding g f
+  -> Embedding (Compose f g) f
+embedComposeInL embedding = Embedding $ \(Compose fg) -> do
+  f <- fmap (runEmbedding embedding) fg
+  (t, embedding') <- f
+  pure (t, embedComposeInL embedding')
 
 embedReaderT :: Monad m => r -> Embedding (ReaderT r m) m
 embedReaderT r = Embedding $ \readerT -> do
