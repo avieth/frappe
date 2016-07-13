@@ -27,7 +27,7 @@ main = do
       networkDescription = do
         evTrue <- async $ threadDelay 500000 >> pure True
         evFalse <- async $ threadDelay 1000000 >> pure False
-        pure $ (evTrue <|> evFalse)
+        pure $ (delayed evTrue <|> delayed evFalse)
 
   let sideChannel :: () -> IO ()
       sideChannel _ = pure ()
