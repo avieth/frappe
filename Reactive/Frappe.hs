@@ -37,6 +37,7 @@ module Reactive.Frappe (
   , andThen
   , switchDelay
   , unionDelays
+  , mergeDelays
   , applyDelays
 
   , Accumulator
