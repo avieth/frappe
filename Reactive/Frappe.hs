@@ -24,6 +24,8 @@ module Reactive.Frappe (
   , immediately
   , applyEvents
   , (>*<)
+  , (>*)
+  , (*<)
   , unionEvents
   , repeatIndefinitely
   , embedEvent
@@ -375,6 +377,14 @@ infixl 4 >*<
 --   @applyEvents@ is a synonym.
 (>*<) :: forall r f s t . ( Monoid r ) => Event r f (s -> t) -> Event r f s -> Event r f t
 (>*<) = applyEvents
+
+infixl 4 >*
+(>*) :: forall r f s t . ( Monoid r ) => Event r f s -> Event r f t -> Event r f s
+(>*) = applyEvents . fmap const
+
+infixl 4 *<
+(*<) :: forall r f s t . ( Monoid r ) => Event r f s -> Event r f t -> Event r f t
+(*<) = applyEvents . fmap (flip const)
 
 -- | Parallel Event application. @(>*<)@ is a synonym.
 applyEvents
