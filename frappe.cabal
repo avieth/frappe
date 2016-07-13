@@ -22,6 +22,7 @@ library
 
   other-modules:       Control.Monad.Cached
                      , Data.Vault.Lambda
+                     , Data.MapAlgebra
   -- other-modules:       
   other-extensions:    RankNTypes, GeneralizedNewtypeDeriving, DeriveFunctor, StandaloneDeriving, ScopedTypeVariables, KindSignatures, GADTs
   build-depends:       base >=4.8 && <4.10
