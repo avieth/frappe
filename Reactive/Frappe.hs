@@ -27,6 +27,7 @@ module Reactive.Frappe (
   , (>*)
   , (*<)
   , unionEvents
+  , withEvent
   , repeatIndefinitely
   , embedEvent
   , transEvent
@@ -43,6 +44,7 @@ module Reactive.Frappe (
   , unionDelays
   , mergeDelays
   , applyDelays
+  , withDelay
 
   , Accumulator
   , accumulator
@@ -80,6 +82,7 @@ import Control.Monad.Trans.Free.Church
 import Control.Monad.Trans.Writer.Strict
 import Control.Monad.Trans.State
 import Control.Monad.Cached
+import Data.Void
 import Data.Bifunctor (bimap)
 import Data.Semigroup
 import Data.List.NonEmpty
@@ -386,6 +389,63 @@ infixl 4 *<
 (*<) :: forall r f s t . ( Monoid r ) => Event r f s -> Event r f t -> Event r f t
 (*<) = applyEvents . fmap (flip const)
 
+-- | Include the effects of some event in some never-ending event.
+withEvent
+  :: forall r f .
+     ( Monoid r )
+  => Event r f ()
+  -> Event r f Void
+  -> Event r f Void
+withEvent evu evv = Event $ do
+  mu :: Either () (Delay r f ()) <- unEvent evu
+  mv :: Either Void (Delay r f Void) <- unEvent evv
+  pure $ case (mu, mv) of
+
+    (_, Left void) -> absurd void
+
+    (Left _, Right delay) -> Right delay
+
+    (Right delayu, Right delayv) -> Right (withDelay delayu delayv)
+
+withDelay
+  :: forall r f .
+     ( Monoid r )
+  => Delay r f ()
+  -> Delay r f Void
+  -> Delay r f Void
+withDelay dlu dlv = Delay pulses
+
+  where
+
+  pulsesu :: forall p . Pulses p r f ()
+  pulsesu = getDelay dlu
+
+  pulsesv :: forall p . Pulses p r f Void
+  pulsesv = getDelay dlv
+
+  decomposed :: MapAlgebra LVault.LambdaVault p (PulseDecomp (Event r f ()) (Event r f Void))
+  decomposed = decomposePulses pulsesu pulsesv
+
+  pulses :: Pulses p r f Void
+  pulses = recomposePulses handleLeft handleRight handleBoth decomposed
+
+  handleLeft :: Event r f () -> Event r f Void
+  handleLeft event = Event $ do
+    choice <- unEvent event
+    case choice of
+      Left () -> pure (Right dlv)
+      Right delay -> pure (Right (withDelay delay dlv))
+
+  handleRight :: Event r f Void -> Event r f Void
+  handleRight event = Event $ do
+    choice <- unEvent event
+    case choice of
+      Left void -> absurd void
+      Right delay -> pure (Right (withDelay dlu delay))
+
+  handleBoth :: Event r f () -> Event r f Void -> Event r f Void
+  handleBoth = withEvent
+
 -- | Parallel Event application. @(>*<)@ is a synonym.
 applyEvents
   :: forall r f s t .
@@ -394,8 +454,8 @@ applyEvents
   -> Event r f s
   -> Event r f t
 applyEvents evf evx = Event $ do
-  mf :: Either (s -> t) (Delay r f (s -> t)) <- (unEvent evf)
-  mx :: Either s (Delay r f s) <- (unEvent evx)
+  mf :: Either (s -> t) (Delay r f (s -> t)) <- unEvent evf
+  mx :: Either s (Delay r f s) <- unEvent evx
   pure $ case (mf, mx) of
 
     (Left f, Left x) -> Left (f x)
