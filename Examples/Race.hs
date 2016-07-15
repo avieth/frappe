@@ -14,16 +14,19 @@ Different biasing can be expressed via unionEvents.
 
 -}
 
+{-# LANGUAGE ExplicitForAll #-}
+
 import Control.Applicative ((<|>))
 import Control.Concurrent
 import Control.Monad.Embedding
+import Data.Functor.Compose
 import Data.Functor.Identity
 import Data.Void
 import Reactive.Frappe
 
 main = do
 
-  let networkDescription :: React (Event () React Bool)
+  let networkDescription :: forall a . React a (Event a () Identity Bool)
       networkDescription = do
         evTrue <- async $ threadDelay 500000 >> pure True
         evFalse <- async $ threadDelay 1000000 >> pure False
@@ -32,7 +35,7 @@ main = do
   let sideChannel :: () -> IO ()
       sideChannel _ = pure ()
 
-  network <- reactimate idEmbedding networkDescription
+  network <- reactimate embedIdentity (Identity (reactive networkDescription))
   outcome <- runNetwork network
                         -- Fires whenever the side-channel fires (event not
                         -- necessarily done).
