@@ -892,13 +892,13 @@ primEvent = React primEventNow
 --   reactimate, for (due to our choice of exports from this module) there is
 --   no way for the programmer to create an Embedding f IO.
 data Reactive (r :: *) (f :: * -> *) (t :: *) = Reactive {
-    runReactive :: forall (a :: *) . React a (Event a r f t)
+    runReactive :: forall (a :: *) . React a (Event a r (Compose f (React a)) t)
   }
 
 instance ( Monoid r ) => Functor (Reactive r f) where
   fmap f (Reactive react) = Reactive $ (fmap . fmap) f react
 
-reactive :: (forall a . React a (Event a r f t)) -> Reactive r f t
+reactive :: (forall a . React a (Event a r (Compose f (React a)) t)) -> Reactive r f t
 reactive = Reactive
 
 -- | Represents an active network.
@@ -921,13 +921,18 @@ reactimate embedding fterm = do
   let nowEnv = NowEnv chan mvar
   (reactive, embedding') <- runEmbedding embedding fterm
   case reactive of
-    (Reactive (react :: forall a . React a (Event a r f q))) -> do
-      Event cached <- runReaderT (runNow (runReact react)) nowEnv
-      let syncf :: SyncF f (Either q (Delay a r f q), r)
+    (Reactive (react :: forall a . React a (Event a r (Compose f (React a)) q))) -> do
+      let nowTerm :: Now a r q (Compose f (React a)) (Event a r (Compose f (React a)) q)
+          nowTerm = runReact react
+      Event cached :: Event a r (Compose f (React a)) q
+        <- runReaderT (runNow nowTerm) nowEnv
+      let syncf :: SyncF (Compose f (React a)) (Either q (Delay a r (Compose f (React a)) q), r)
           syncf = runWriterT (runCached cached)
-          statet :: StateT (Embedding f IO) IO (Either q (Delay a r f q), r)
+          statet :: StateT (Embedding (Compose f (React a)) IO) IO (Either q (Delay a r (Compose f (React a)) q), r)
           statet = embedSyncF syncf
-      ((choice, rs), embedding'') <- runStateT statet embedding'
+      let composeEmbedding :: Embedding (Compose f (React a)) IO
+          composeEmbedding = undefined
+      ((choice, rs), embedding'') <- runStateT statet composeEmbedding
       case choice of
         Left done -> do
           writeChan chan (rs, Just done)

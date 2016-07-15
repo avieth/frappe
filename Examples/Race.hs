@@ -26,16 +26,19 @@ import Reactive.Frappe
 
 main = do
 
-  let networkDescription :: forall a . React a (Event a () Identity Bool)
+  let networkDescription :: forall a . React a (Event a () (Compose Identity (React a)) Bool)
       networkDescription = do
         evTrue <- async $ threadDelay 500000 >> pure True
         evFalse <- async $ threadDelay 1000000 >> pure False
         pure $ (delayed evTrue <|> delayed evFalse)
 
+  let reactiveTerm :: Identity (Reactive () Identity Bool)
+      reactiveTerm = Identity (reactive networkDescription)
+
   let sideChannel :: () -> IO ()
       sideChannel _ = pure ()
 
-  network <- reactimate embedIdentity (Identity (reactive networkDescription))
+  network <- reactimate embedIdentity reactiveTerm
   outcome <- runNetwork network
                         -- Fires whenever the side-channel fires (event not
                         -- necessarily done).
