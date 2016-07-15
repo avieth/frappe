@@ -45,6 +45,8 @@ module Reactive.Frappe (
   , mergeDelays
   , applyDelays
   , withDelay
+  , embedDelay
+  , transDelay
 
   , Accumulator
   , accumulator
@@ -99,7 +101,7 @@ newtype Stepper r f t = Stepper {
 instance ( Monoid r ) => Functor (Stepper r f) where
   fmap f ~(Stepper (initial, next)) = Stepper (f initial, fmap f next)
 
-instance ( Functor f, Monoid r ) => Applicative (Stepper r f) where
+instance ( Monoid r ) => Applicative (Stepper r f) where
   pure t = Stepper (t, indefiniteDelay)
   ~(Stepper (f, delayf)) <*> ~(Stepper (x, delayx)) = Stepper $
     (y, fmap snd (unionDelays unioner delayf' delayx'))
@@ -109,7 +111,7 @@ instance ( Functor f, Monoid r ) => Applicative (Stepper r f) where
     delayx' = fmap (\x -> ((f, x), f x)) delayx
     y = f x
 
-stepper :: ( Monoid r ) => t -> Delay r f t -> Stepper r f t
+stepper :: ( ) => t -> Delay r f t -> Stepper r f t
 stepper t delay = Stepper (t, delay)
 
 initial :: Stepper r f t -> t
@@ -351,6 +353,25 @@ embedEvent embedding = embedEvent_ embedding''
         pulses :: forall p . Pulses p r g t
         pulses = Fmap (embedEvent_ embedding') (getDelay delay)
 
+transDelay
+  :: forall r f g t .
+     ( Functor f, Functor g, Monoid r )
+  => (forall t . f t -> g t)
+  -> Delay r f t
+  -> Delay r g t
+transDelay trans = embedDelay (naturalEmbedding trans)
+
+embedDelay
+  :: forall r f g t .
+     ( Functor f, Functor g, Monoid r )
+  => Embedding f g
+  -> Delay r f t
+  -> Delay r g t
+embedDelay embedding delay = Delay pulses
+  where
+  pulses :: forall p . Pulses p r g t
+  pulses = fmap (embedEvent embedding) (getDelay delay)
+
 -- | Monadic join for Events.
 switchEvent
   :: forall r f t .
@@ -511,7 +532,7 @@ applyDelays df dx = Delay pulses'
 --   use a disambiguating function.
 unionEvents
   :: forall r f t .
-     ( Monoid r, Functor f )
+     ( Monoid r )
   => (t -> t -> t)
   -> Event r f t
   -> Event r f t
@@ -811,7 +832,7 @@ newtype Network r q = Network (Chan (r, Maybe q))
 -- | Use an embedding of f into React to create an event network.
 reactimate
   :: forall r q f .
-     ( Monoid r, Monad f )
+     ( Monoid r, Functor f )
   => Embedding f React
   -> f (Event r f q)
   -> IO (Network r q)
