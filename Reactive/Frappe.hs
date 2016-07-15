@@ -316,6 +316,29 @@ mapDelay f delay = Delay pulses
   pulses :: Pulses p r f t
   pulses = Fmap (mapEvent f) (getDelay delay)
 
+changeEvent
+  :: forall r q f t .
+     ( Monoid q, Functor f )
+  => (r -> q)
+  -> Event r f t
+  -> Event q f t
+changeEvent change event = Event $ do
+  choice <- changeCached change (unEvent event)
+  case choice of
+    Left t -> pure (Left t)
+    Right delay -> pure (Right (changeDelay change delay))
+
+changeDelay
+  :: forall r q f t .
+     ( Monoid q, Functor f )
+  => (r -> q)
+  -> Delay r f t
+  -> Delay q f t
+changeDelay change delay = Delay pulses
+  where
+  pulses :: forall p . Pulses p q f t
+  pulses = fmap (changeEvent change) (getDelay delay)
+
 -- | Use a natural transformation to bring some Event to another functor.
 transEvent
   :: forall r f g t .

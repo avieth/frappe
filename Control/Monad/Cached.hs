@@ -21,6 +21,7 @@ module Control.Monad.Cached (
   , runCached
   , cached
   , transCached
+  , changeCached
   , withResidues
   , cachedEmbedding
 
@@ -89,6 +90,16 @@ runCached
   => Cached r f t
   -> WriterT r f t
 runCached (Cached stateT) = evalStateT stateT emptyCache
+
+changeCached
+  :: forall r q f t .
+     ( Functor f )
+  => (r -> q)
+  -> Cached r f t
+  -> Cached q f t
+changeCached change (Cached (StateT term)) = Cached (StateT (fmap change' term))
+  where
+  change' = mapWriterT (fmap (\(t, r) -> (t, change r)))
 
 transCached
   :: forall r f g t .
