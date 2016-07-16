@@ -930,9 +930,15 @@ reactimate embedding fterm = do
           syncf = runWriterT (runCached cached)
           statet :: StateT (Embedding (Compose f (React a)) IO) IO (Either q (Delay a r (Compose f (React a)) q), r)
           statet = embedSyncF syncf
-      let composeEmbedding :: Embedding (Compose f (React a)) IO
-          composeEmbedding = undefined
-      ((choice, rs), embedding'') <- runStateT statet composeEmbedding
+      let embedReactIO :: Embedding (React a) IO
+          embedReactIO = embedNow nowEnv
+                         `composeEmbedding`
+                         embedReact
+          embedding'' :: Embedding (Compose f (React a)) IO
+          embedding'' = embedComposeInR embedding'
+                        `composeEmbedding`
+                        embedComposeR embedReactIO
+      ((choice, rs), embedding'') <- runStateT statet embedding''
       case choice of
         Left done -> do
           writeChan chan (rs, Just done)
