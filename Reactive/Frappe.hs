@@ -223,6 +223,13 @@ newtype Delay (a :: *) (r :: *) (f :: * -> *) (t :: *) = Delay {
 instance ( Monoid r ) => Functor (Delay a r f) where
   fmap = mapDelay
 
+instance ( Monoid r, Semigroup t ) => Semigroup (Delay a r f t) where
+  (<>) = unionDelays (<>)
+
+instance ( Monoid r, Semigroup t ) => Monoid (Delay a r f t) where
+  mempty = indefiniteDelay
+  mappend = (<>)
+
 delayed :: ( Monoid r ) => Delay a r f t -> Event a r f t
 delayed = Event . cached . pure . Right
 
@@ -263,6 +270,13 @@ instance ( Monoid r, Functor f ) => Alternative (Event a r f) where
 
 instance ( Monoid r ) => MonadTrans (Event a r) where
   lift = Event . cached . lift . liftF . fmap Left
+
+instance ( Monoid r, Semigroup t ) => Semigroup (Event a r f t) where
+  (<>) = unionEvents (<>)
+
+instance ( Monoid r, Semigroup t ) => Monoid (Event a r f t) where
+  mempty = never
+  mappend = (<>)
 
 -- | An Event which never happens.
 never :: ( Monoid r ) => Event a r f t
