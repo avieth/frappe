@@ -68,6 +68,7 @@ module Reactive.Frappe (
 
   , Reactive
   , reactive
+  , runReactive
 
   , Network
   , reactimate
@@ -843,7 +844,9 @@ asyncOSNow
   -> Now a r q f (Delay a x g t)
 asyncOSNow io = do
   (ev, cb) <- primEventNow
-  syncNow (Async.withAsyncBound (io >>= cb) (const (pure ev)))
+  _ <- syncNow $ do result <- Async.asyncBound (io >>= cb)
+                    Async.link result
+  pure ev
 
 -- | Do asynchronous IO in an OS thread. The @Delay@ fires when it's done.
 asyncOS
