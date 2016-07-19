@@ -25,12 +25,13 @@ library
                      , Data.MapAlgebra
   -- other-modules:       
   other-extensions:    RankNTypes, GeneralizedNewtypeDeriving, DeriveFunctor, StandaloneDeriving, ScopedTypeVariables, KindSignatures, GADTs
-  build-depends:       base >=4.8 && <4.10
-                     , transformers >=0.5 && <0.6
+  build-depends:       base >=4.7 && <4.10
+                     , transformers >=0.4 && <0.6
                      , random >=1.1 && <1.2
                      , unordered-containers >=0.2 && <0.3
                      , free >=4.12 && <4.13
                      , async >=2.0 && <3.0
-                     , semigroups >=0.18 && <0.19
+                     , semigroups >=0.17 && <0.19
+                     , vault >=0.3 && <0.4
   -- hs-source-dirs:      
   default-language:    Haskell2010
