@@ -26,7 +26,7 @@ module Data.Vault.Lambda (
 
 import Prelude hiding (lookup)
 import Unsafe.Coerce
-import Data.Unique
+import Data.Unique.Really
 import qualified Data.HashMap.Strict as HM
 
 data SomeFunction t where
