@@ -26,14 +26,14 @@ import Reactive.Frappe
 
 main = do
 
-  let networkDescription :: forall a . React a (Event a () (Compose Identity (React a)) Bool)
-      networkDescription = do
-        evTrue <- async $ threadDelay 500000 >> pure True
-        evFalse <- async $ threadDelay 1000000 >> pure False
-        pure $ (delayed evTrue <|> delayed evFalse)
+  let topLevelEvent :: forall a . Event a () (Compose Identity (React a)) Bool
+      topLevelEvent = do
+        evTrue <- now $ Compose . Identity . async $ threadDelay 500000 >> pure True
+        evFalse <- now $ Compose . Identity . async $ threadDelay 1000000 >> pure False
+        delayed evTrue <|> delayed evFalse
 
-  let reactiveTerm :: Identity (Reactive () Identity Bool)
-      reactiveTerm = Identity (reactive networkDescription)
+  let reactiveTerm :: Reactive () Identity Bool
+      reactiveTerm = reactive topLevelEvent
 
   let sideChannel :: () -> IO ()
       sideChannel _ = pure ()

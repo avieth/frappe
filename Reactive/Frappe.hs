@@ -911,16 +911,16 @@ primEvent = React primEventNow
 --
 --   Note that if f has React built-in (perhaps it is React, or is a transformer
 --   or Compose over React) then the Reactive r f t won't be usable in
---   reactimate, for (due to our choice of exports from this module) there is
---   no way for the programmer to create an Embedding f IO.
+--   reactimate, for there is no type safe way for the programmer to create an
+--   Embedding f Identity.
 data Reactive (r :: *) (f :: * -> *) (t :: *) = Reactive {
-    runReactive :: forall (a :: *) . React a (Event a r (Compose f (React a)) t)
+    runReactive :: forall (a :: *) . Event a r (Compose f (React a)) t
   }
 
 instance ( Monoid r ) => Functor (Reactive r f) where
-  fmap f (Reactive react) = Reactive $ (fmap . fmap) f react
+  fmap f (Reactive react) = Reactive $ fmap f react
 
-reactive :: (forall a . React a (Event a r (Compose f (React a)) t)) -> Reactive r f t
+reactive :: (forall a . Event a r (Compose f (React a)) t) -> Reactive r f t
 reactive = Reactive
 
 -- | Represents an active network.
@@ -934,19 +934,14 @@ reactimate
   :: forall a r q f .
      ( Monoid r, Functor f )
   => Embedding f Identity
-  -> f (Reactive r f q)
+  -> Reactive r f q
   -> IO (Network r q)
-reactimate embedding fterm = do
+reactimate embedding reactive = do
   chan <- newChan
   mvar <- newEmptyMVar
   let nowEnv = NowEnv chan mvar
-  let Identity (reactive, embedding') = runEmbedding embedding fterm
   case reactive of
-    (Reactive (react :: forall a . React a (Event a r (Compose f (React a)) q))) -> do
-      let nowTerm :: Now a r q (Compose f (React a)) (Event a r (Compose f (React a)) q)
-          nowTerm = runReact react
-      Event cached :: Event a r (Compose f (React a)) q
-        <- runReaderT (runNow nowTerm) nowEnv
+    (Reactive (Event cached :: forall a . Event a r (Compose f (React a)) q)) -> do
       let syncf :: SyncF (Compose f (React a)) (Either q (Delay a r (Compose f (React a)) q), r)
           syncf = runWriterT (runCached cached)
           statet :: StateT (Embedding (Compose f (React a)) IO) IO (Either q (Delay a r (Compose f (React a)) q), r)
@@ -957,7 +952,7 @@ reactimate embedding fterm = do
                          embedReact
           -- An embedding of f into IO through the embedding into Identity.
           embedFIO :: Embedding f IO
-          embedFIO = embedIdentity `composeEmbedding` embedding'
+          embedFIO = embedIdentity `composeEmbedding` embedding
           -- Embed the right-hand-side of the compose (React a) into IO, then
           -- embed the left-hand-side (f) into IO and merge.
           embedding'' :: Embedding (Compose f (React a)) IO
