@@ -82,6 +82,7 @@ import Control.Exception
 import Control.Concurrent
 import qualified Control.Concurrent.Async as Async
 import Control.Monad.Embedding
+import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Free.Church
@@ -89,6 +90,7 @@ import Control.Monad.Trans.Writer.Strict
 import Control.Monad.Trans.State
 import Control.Monad.Cached
 import Data.Void
+import Data.Functor.Identity
 import Data.Functor.Compose
 import Data.Bifunctor (bimap)
 import Data.Semigroup
@@ -803,6 +805,9 @@ instance Monad (React a) where
   return = pure
   React x >>= k = React $ x >>= runReact . k
 
+instance MonadIO (React a) where
+  liftIO = sync
+
 embedNow :: NowEnv a r f q -> Embedding (Now a r q f) IO
 embedNow nowEnv =
   let embedding = Embedding $ \(Now reader) -> do
@@ -923,20 +928,19 @@ newtype Network r q = Network (Chan (r, Maybe q))
 
 -- | Set up a Network for a Reactive computation. The functor parameter of
 --   the Reactive must not be capable of doing React computations, else it
---   will be impossible to embed it into IO (unless the programmer somehow
---   obtains definitions internal to this module). Therefore the use of
---   Reactive here prevents any Event from coming out of the reactimate.
+--   will be impossible to embed it into Identity (without unsafe features,
+--   which would almost surely cause a crash).
 reactimate
   :: forall a r q f .
      ( Monoid r, Functor f )
-  => Embedding f IO
+  => Embedding f Identity
   -> f (Reactive r f q)
   -> IO (Network r q)
 reactimate embedding fterm = do
   chan <- newChan
   mvar <- newEmptyMVar
   let nowEnv = NowEnv chan mvar
-  (reactive, embedding') <- runEmbedding embedding fterm
+  let Identity (reactive, embedding') = runEmbedding embedding fterm
   case reactive of
     (Reactive (react :: forall a . React a (Event a r (Compose f (React a)) q))) -> do
       let nowTerm :: Now a r q (Compose f (React a)) (Event a r (Compose f (React a)) q)
@@ -951,8 +955,13 @@ reactimate embedding fterm = do
           embedReactIO = embedNow nowEnv
                          `composeEmbedding`
                          embedReact
+          -- An embedding of f into IO through the embedding into Identity.
+          embedFIO :: Embedding f IO
+          embedFIO = embedIdentity `composeEmbedding` embedding'
+          -- Embed the right-hand-side of the compose (React a) into IO, then
+          -- embed the left-hand-side (f) into IO and merge.
           embedding'' :: Embedding (Compose f (React a)) IO
-          embedding'' = embedComposeInR embedding'
+          embedding'' = embedComposeInR embedFIO
                         `composeEmbedding`
                         embedComposeR embedReactIO
       ((choice, rs), embedding'') <- runStateT statet embedding''
