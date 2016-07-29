@@ -35,7 +35,7 @@ main = do
   let reactiveTerm :: Reactive () Identity Bool
       reactiveTerm = reactive topLevelEvent
 
-  let sideChannel :: () -> IO ()
+  let sideChannel :: Maybe () -> IO ()
       sideChannel _ = pure ()
 
   network <- reactimate embedIdentity reactiveTerm

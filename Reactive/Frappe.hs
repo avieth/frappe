@@ -40,6 +40,7 @@ module Reactive.Frappe (
   , indefiniteDelay
   , delayed
   , andThen
+  , continueDelay
   , switchDelay
   , unionDelays
   , mergeDelays
@@ -48,10 +49,12 @@ module Reactive.Frappe (
   , embedDelay
   , transDelay
 
+  {-
   , Accumulator
   , accumulator
   , accumulate
   , accumulateAll
+  -}
 
   , Stepper(..)
   , stepper
@@ -105,10 +108,10 @@ newtype Stepper a r f t = Stepper {
     getStepper :: (t, Delay a r f t)
   }
 
-instance ( Monoid r ) => Functor (Stepper a r f) where
+instance ( Semigroup r ) => Functor (Stepper a r f) where
   fmap f ~(Stepper (initial, next)) = Stepper (f initial, fmap f next)
 
-instance ( Monoid r ) => Applicative (Stepper a r f) where
+instance ( Semigroup r ) => Applicative (Stepper a r f) where
   pure t = Stepper (t, indefiniteDelay)
   ~(Stepper (f, delayf)) <*> ~(Stepper (x, delayx)) = Stepper $
     (y, fmap snd (unionDelays unioner delayf' delayx'))
@@ -129,7 +132,7 @@ changes = snd . getStepper
 
 applyStepper
   :: forall a r f s t .
-     ( Monoid r, Functor f )
+     ( Semigroup r, Functor f )
   => Stepper a r f (s -> t)
   -> Delay a r f s
   -> Delay a r f t
@@ -148,7 +151,7 @@ applyStepper ~(Stepper (f, step)) delay =
 
 infixl 4 <@>
 (<@>)
-  :: ( Monoid r, Functor f )
+  :: ( Semigroup r, Functor f )
   => Stepper a r f (s -> t)
   -> Delay a r f s
   -> Delay a r f t
@@ -223,17 +226,17 @@ newtype Delay (a :: *) (r :: *) (f :: * -> *) (t :: *) = Delay {
     getDelay :: forall p . Pulses p a r f t
   }
 
-instance ( Monoid r ) => Functor (Delay a r f) where
+instance ( Semigroup r ) => Functor (Delay a r f) where
   fmap = mapDelay
 
-instance ( Monoid r, Semigroup t ) => Semigroup (Delay a r f t) where
+instance ( Semigroup r, Semigroup t ) => Semigroup (Delay a r f t) where
   (<>) = unionDelays (<>)
 
-instance ( Monoid r, Semigroup t ) => Monoid (Delay a r f t) where
+instance ( Semigroup r, Semigroup t ) => Monoid (Delay a r f t) where
   mempty = indefiniteDelay
   mappend = (<>)
 
-delayed :: ( Monoid r ) => Delay a r f t -> Event a r f t
+delayed :: ( Semigroup r ) => Delay a r f t -> Event a r f t
 delayed = Event . cached . pure . Right
 
 -- | A Delay which never ends.
@@ -242,7 +245,7 @@ indefiniteDelay = Delay (Literal LVault.empty)
 
 -- | Continue a Delay.
 andThen
-  :: ( Monoid r, Functor f )
+  :: ( Semigroup r, Functor f )
   => Delay a r f s
   -> (s -> Event a r f t)
   -> Delay a r f t
@@ -250,67 +253,67 @@ andThen delay k = Delay $ Fmap (>>= k) (getDelay delay)
 
 -- | Some f-computation which may or may not immediately yield a value.
 newtype Event (a :: *) (r :: *) (f :: * -> *) (t :: *) = Event {
-    unEvent :: Cached r (SyncF f) (Either t (Delay a r f t))
+    unEvent :: Cached (Option r) (SyncF f) (Either t (Delay a r f t))
   }
 
-instance ( Monoid r ) => Functor (Event a r f) where
+instance ( Semigroup r ) => Functor (Event a r f) where
   fmap = mapEvent
 
-instance ( Monoid r, Functor f ) => Applicative (Event a r f) where
+instance ( Semigroup r, Functor f ) => Applicative (Event a r f) where
   pure = pureEvent
   -- NB the applicative and monad instances for Event r f are consistent; we
   -- do *not* use (<*>) = applyEvents as that function introduces
   -- concurrency.
   (<*>) = ap
 
-instance ( Monoid r, Functor f ) => Monad (Event a r f) where
+instance ( Semigroup r, Functor f ) => Monad (Event a r f) where
   return = pure
   ev >>= k = switchEvent (mapEvent k ev)
 
-instance ( Monoid r, Functor f ) => Alternative (Event a r f) where
+instance ( Semigroup r, Functor f ) => Alternative (Event a r f) where
   empty = never
   left <|> right = unionEvents const left right
 
-instance ( Monoid r ) => MonadTrans (Event a r) where
+instance ( Semigroup r ) => MonadTrans (Event a r) where
   lift = Event . cached . lift . liftF . fmap Left
 
-instance ( Monoid r, Semigroup t ) => Semigroup (Event a r f t) where
+instance ( Semigroup r, Semigroup t ) => Semigroup (Event a r f t) where
   (<>) = unionEvents (<>)
 
-instance ( Monoid r, Semigroup t ) => Monoid (Event a r f t) where
+instance ( Semigroup r, Semigroup t ) => Monoid (Event a r f t) where
   mempty = never
   mappend = (<>)
 
 -- | An Event which never happens.
-never :: ( Monoid r ) => Event a r f t
+never :: ( Semigroup r ) => Event a r f t
 never = Event . cached $ pure (Right indefiniteDelay)
 
 -- | Like lift but better, because it doesn't have the Monad f constraint.
-now :: ( Monoid r, Functor f ) => f t -> Event a r f t
+now :: ( Semigroup r, Functor f ) => f t -> Event a r f t
 now term = immediate (lift (liftSyncF term))
 
 -- | Put out some data on the Event's side-channel.
-emit :: ( Monoid r ) => r -> Event a r f ()
-emit r = immediate (tell r)
+emit :: ( Semigroup r ) => r -> Event a r f ()
+emit r = immediate (tell (Option (Just r)))
 
 immediate
   :: forall a r f t .
-     ( Monoid r )
-  => WriterT r (SyncF f) t
+     ( Semigroup r )
+  => WriterT (Option r) (SyncF f) t
   -> Event a r f t
 immediate term =
-  let term' :: WriterT r (SyncF f) (Either t (Delay a r f t))
+  let term' :: WriterT (Option r) (SyncF f) (Either t (Delay a r f t))
       term' = fmap Left term
   in  Event (cached term')
 
 -- | Repeat an Event again and again, realizing its effects but never a value.
-repeatIndefinitely :: ( Monoid r, Functor f ) => Event a r f t -> Event a r f x
+repeatIndefinitely :: ( Semigroup r, Functor f ) => Event a r f t -> Event a r f x
 repeatIndefinitely event = let event' = event >> event' in event'
 
 -- | An Event which immediately yields some value.
 pureEvent
   :: forall a r f t .
-     ( Monoid r )
+     ( Semigroup r )
   => t
   -> Event a r f t
 pureEvent t = Event . cached $ pure (Left t)
@@ -318,14 +321,14 @@ pureEvent t = Event . cached $ pure (Left t)
 -- | Like Applicative pure but inside f.
 immediately
   :: forall a r f t .
-     ( Monoid r, Functor f )
+     ( Semigroup r, Functor f )
   => f t
   -> Event a r f t
 immediately term = immediate (lift (liftSyncF term))
 
 mapEvent
   :: forall a r f s t .
-     ( Monoid r )
+     ( Semigroup r )
   => (s -> t)
   -> Event a r f s
   -> Event a r f t
@@ -333,7 +336,7 @@ mapEvent f event = Event $ fmap (bimap f (mapDelay f)) (unEvent event)
 
 mapDelay
   :: forall a r f s t .
-     ( Monoid r )
+     ( Semigroup r )
   => (s -> t)
   -> Delay a r f s
   -> Delay a r f t
@@ -342,10 +345,23 @@ mapDelay f delay = Delay pulses
   pulses :: Pulses p a r f t
   pulses = Fmap (mapEvent f) (getDelay delay)
 
+continueDelay
+  :: forall a r q f g s t .
+     ( )
+  => Delay a r f s
+  -> (Event a r f s -> Event a q g t)
+  -> Delay a q g t
+continueDelay delay k = Delay pulses'
+  where
+  pulses :: forall p . Pulses p a r f s
+  pulses = getDelay delay
+  pulses' :: forall p . Pulses p a q g t
+  pulses' = fmap k pulses
+
 changeEvent
   :: forall a r q f t .
-     ( Monoid q, Functor f )
-  => (r -> q)
+     ( Semigroup q, Functor f )
+  => (Option r -> Option q)
   -> Event a r f t
   -> Event a q f t
 changeEvent change event = Event $ do
@@ -356,8 +372,8 @@ changeEvent change event = Event $ do
 
 changeDelay
   :: forall a r q f t .
-     ( Monoid q, Functor f )
-  => (r -> q)
+     ( Semigroup q, Functor f )
+  => (Option r -> Option q)
   -> Delay a r f t
   -> Delay a q f t
 changeDelay change delay = Delay pulses
@@ -368,7 +384,7 @@ changeDelay change delay = Delay pulses
 -- | Use a natural transformation to bring some Event to another functor.
 transEvent
   :: forall a r f g t .
-     ( Functor f, Functor g, Monoid r )
+     ( Functor f, Functor g, Semigroup r )
   => (forall t . f t -> g t)
   -> Event a r f t
   -> Event a r g t
@@ -378,7 +394,7 @@ transEvent trans = embedEvent (naturalEmbedding trans)
 --   @transEvent@ is a special case of this.
 embedEvent
   :: forall a r f g t .
-     ( Functor f, Functor g, Monoid r )
+     ( Functor f, Functor g, Semigroup r )
   => Embedding f g
   -> Event a r f t
   -> Event a r g t
@@ -386,11 +402,11 @@ embedEvent embedding = embedEvent_ embedding''
   where
   embedding' :: Embedding (SyncF f) (SyncF g)
   embedding' = syncFEmbedding embedding
-  embedding'' :: Embedding (Cached r (SyncF f)) (Cached r (SyncF g))
+  embedding'' :: Embedding (Cached (Option r) (SyncF f)) (Cached (Option r) (SyncF g))
   embedding'' = cachedEmbedding embedding'
 
   embedEvent_
-    :: Embedding (Cached r (SyncF f)) (Cached r (SyncF g))
+    :: Embedding (Cached (Option r) (SyncF f)) (Cached (Option r) (SyncF g))
     -> Event a r f t
     -> Event a r g t
   embedEvent_ embedding event = Event $ do
@@ -404,7 +420,7 @@ embedEvent embedding = embedEvent_ embedding''
 
 transDelay
   :: forall a r f g t .
-     ( Functor f, Functor g, Monoid r )
+     ( Functor f, Functor g, Semigroup r )
   => (forall t . f t -> g t)
   -> Delay a r f t
   -> Delay a r g t
@@ -412,7 +428,7 @@ transDelay trans = embedDelay (naturalEmbedding trans)
 
 embedDelay
   :: forall a r f g t .
-     ( Functor f, Functor g, Monoid r )
+     ( Functor f, Functor g, Semigroup r )
   => Embedding f g
   -> Delay a r f t
   -> Delay a r g t
@@ -424,7 +440,7 @@ embedDelay embedding delay = Delay pulses
 -- | Monadic join for Events.
 switchEvent
   :: forall a r f t .
-     ( Monoid r, Functor f )
+     ( Semigroup r, Functor f )
   => Event a r f (Event a r f t)
   -> Event a r f t
 switchEvent event = Event $ do
@@ -435,7 +451,7 @@ switchEvent event = Event $ do
 
 switchDelay
   :: forall a r f t .
-     ( Monoid r, Functor f )
+     ( Semigroup r, Functor f )
   => Delay a r f (Event a r f t)
   -> Delay a r f t
 switchDelay ~(Delay pulses) = Delay pulses'
@@ -450,7 +466,7 @@ infixl 4 >*<
 --   @applyEvents@ is a synonym.
 (>*<)
   :: forall a r f s t .
-     ( Monoid r )
+     ( Semigroup r )
   => Event a r f (s -> t)
   -> Event a r f s
   -> Event a r f t
@@ -459,7 +475,7 @@ infixl 4 >*<
 infixl 4 >*
 (>*)
   :: forall a r f s t .
-     ( Monoid r )
+     ( Semigroup r )
   => Event a r f s
   -> Event a r f t
   -> Event a r f s
@@ -468,7 +484,7 @@ infixl 4 >*
 infixl 4 *<
 (*<)
   :: forall a r f s t .
-     ( Monoid r )
+     ( Semigroup r )
   => Event a r f s
   -> Event a r f t
   -> Event a r f t
@@ -477,7 +493,7 @@ infixl 4 *<
 -- | Include the effects of some event in some never-ending event.
 withEvent
   :: forall a r f .
-     ( Monoid r )
+     ( Semigroup r )
   => Event a r f ()
   -> Event a r f Void
   -> Event a r f Void
@@ -494,7 +510,7 @@ withEvent evu evv = Event $ do
 
 withDelay
   :: forall a r f .
-     ( Monoid r )
+     ( Semigroup r )
   => Delay a r f ()
   -> Delay a r f Void
   -> Delay a r f Void
@@ -534,7 +550,7 @@ withDelay dlu dlv = Delay pulses
 -- | Parallel Event application. @(>*<)@ is a synonym.
 applyEvents
   :: forall a r f s t .
-     ( Monoid r )
+     ( Semigroup r )
   => Event a r f (s -> t)
   -> Event a r f s
   -> Event a r f t
@@ -556,7 +572,7 @@ applyEvents evf evx = Event $ do
 -- | Like @applyEvents@ aka @(>*<)@ but for Delays.
 applyDelays
   :: forall a r f s t .
-     ( Monoid r )
+     ( Semigroup r )
   => Delay a r f (s -> t)
   -> Delay a r f s
   -> Delay a r f t
@@ -596,7 +612,7 @@ applyDelays df dx = Delay pulses'
 --   use a disambiguating function.
 unionEvents
   :: forall a r f t .
-     ( Monoid r )
+     ( Semigroup r )
   => (t -> t -> t)
   -> Event a r f t
   -> Event a r f t
@@ -617,7 +633,7 @@ unionEvents disambiguate evl evr = Event $ do
 --   use a disambiguating function.
 unionDelays
   :: forall a r f t .
-     ( Monoid r )
+     ( Semigroup r )
   => (t -> t -> t)
   -> Delay a r f t
   -> Delay a r f t
@@ -641,7 +657,7 @@ unionDelays disambiguate = mergeDelays merger
 --   Check out @unionDelays@ and @applyStepper@ for examples of use.
 mergeDelays
   :: forall a x f s t r .
-     ( Monoid x )
+     ( Semigroup x )
   => (Either s (Delay a x f s) -> Either t (Delay a x f t) -> Either r (Delay a x f r))
   -> Delay a x f s
   -> Delay a x f t
@@ -703,35 +719,62 @@ recomposePulses left right both = Fmap recompose
     PDRight r -> right r
     PDBoth l r -> both l r
 
+{-
 factorEvent
   :: forall a r q f s t .
-     ( Monoid q )
-  => (r -> Either (Event a r f s) s -> Event a q f t)
+     ( Semigroup q )
+  => (Maybe r -> Either (Event a r f s) s -> Event a q f t)
   -> Event a r f s
   -> Event a q f t
 factorEvent k event = Event $ do
-  (choice, rs) <- withResidues (unEvent event)
+  (choice, Option r) <- withResidues (unEvent event)
   case choice of
-    Left s -> unEvent (k rs (Right s))
-    Right (Delay pulses) -> pure (Right (Delay (fmap (k rs . Left) pulses)))
+    Left s -> unEvent (k r (Right s))
+    Right (Delay pulses) -> pure (Right (Delay (fmap (k r . Left) pulses)))
+-}
 
+-- | Always fires at the next step of the event, with its semigroup
+--   side-channel.
+factorEvent
+  :: forall a r q f t .
+     ( Semigroup r, Semigroup q, Functor f )
+  => Event a r f t
+  -> Event a q f (Maybe r, Either t (Delay a r f t))
+factorEvent event = Event $ do
+  (choice, Option mr) <- withResidues (unEvent event)
+  case choice of
+    Left t -> pure (Left (mr, Left t))
+    Right delay -> pure (Left (mr, Right delay))
+
+-- | Fires the next time the semigroup side-channel of type @r@ appears.
+--   Compare at @factorEvent@, which gives @Maybe r@.
+--
+--   NB if the event ends (t is given) but doesn't come with an r-value then
+--   you don't see the end.
 nextSemigroup
-  :: ( Functor f, Semigroup r, Monoid q )
-  => Event a [r] f t
-  -> Event a q f r
-nextSemigroup = factorEvent $ \rs choice -> case nonEmpty rs of
-  Just ne -> pure (sconcat ne)
-  Nothing -> case choice of
-    Left event' -> nextSemigroup event'
-    Right _ -> never
+  :: forall a r q f t .
+     ( Semigroup r, Semigroup q, Functor f )
+  => Event a r f t
+  -> Event a q f (r, Either t (Delay a r f t))
+nextSemigroup event = do
+  (mr, next) <- factored
+  case (mr, next) of
+    (Nothing, Left t) -> never
+    (Nothing, Right delay) -> delayed (continueDelay delay nextSemigroup)
+    (Just r, Left t) -> pure (r, Left t)
+    (Just r, Right delay) -> pure (r, Right delay)
+  where
+  factored :: Event a q f (Maybe r, Either t (Delay a r f t))
+  factored = factorEvent event
 
+{-
 newtype Accumulator a r f t = Accumulator {
     getAccumulator :: Event a r f (t, Maybe (Accumulator a r f t))
   }
 
 accumulate
   :: forall a r f s t .
-     ( Functor f, Monoid r )
+     ( Functor f, Semigroup r )
   => (s -> Maybe (Accumulator a r f s) -> Event a r f t)
   -> Accumulator a r f s
   -> Event a r f t
@@ -742,7 +785,7 @@ accumulate k acc = do
 -- | Take the final value of an accumulator. It's done when the accumulator
 --   input event is done.
 accumulateAll
-  :: ( Functor f, Monoid r )
+  :: ( Functor f, Semigroup r )
   => Accumulator a r f t
   -> Event a r f t
 accumulateAll = accumulate $ \t next -> case next of
@@ -753,7 +796,7 @@ accumulateAll = accumulate $ \t next -> case next of
 --   value.
 accumulator
   :: forall a f r t anything .
-     ( Functor f, Monoid r )
+     ( Functor f, Semigroup r )
   => t
   -> Event a (Option (Last (t -> t))) f anything
   -> Accumulator a r f t
@@ -769,10 +812,11 @@ accumulator acc event = Accumulator $ flip factorEvent event $ \r choice -> case
       acc' = f acc
       next :: Accumulator a r f t
       next = accumulator acc' event'
+-}
 
 -- | A @NowEnv a r f t@ contains data necessary to pulse an event network.
 data NowEnv (a :: *) (r :: *) (f :: * -> *) (t :: *) = NowEnv {
-    nowChan :: Chan (r, Maybe t) -- ^ Dump outputs here
+    nowChan :: Chan (Maybe r, Maybe t) -- ^ Dump outputs here
   , nowEval :: MVar (Delay a r f t, Embedding f IO)
     -- ^ The current continuation (Delay) and embedding.
   }
@@ -788,11 +832,11 @@ deriving instance Applicative (Now a r q f)
 deriving instance Monad (Now a r q f)
 
 -- | A @Now r q f t@ term which is almost free in @r@ and @q@: the former
---   must be a @Monoid@ and the latter a @Functor@.
+--   must be a @Semigroup@ and the latter a @Functor@.
 --
 --   It can do IO via @sync@ and @async@, and can create primitive @Delay@s.
 newtype React (a :: *) (t :: *) = React {
-    runReact :: forall r q f . ( Monoid r, Functor f ) => Now a r q f t
+    runReact :: forall r q f . ( Semigroup r, Functor f ) => Now a r q f t
   }
 
 deriving instance Functor (React a)
@@ -817,7 +861,7 @@ embedNow nowEnv =
 
 embedReact
   :: forall a r q f .
-     ( Monoid r, Functor f )
+     ( Semigroup r, Functor f )
   => Embedding (React a) (Now a r q f)
 embedReact = Embedding $ \react -> fmap (flip (,) embedReact) (runReact react)
 
@@ -830,7 +874,7 @@ sync :: IO t -> React a t
 sync io = React $ syncNow io
 
 asyncNow
-  :: ( Monoid r, Monoid x, Functor f )
+  :: ( Semigroup r, Semigroup x, Functor f )
   => IO t
   -> Now a r q f (Delay a x g t)
 asyncNow io = do
@@ -840,11 +884,11 @@ asyncNow io = do
   pure ev
 
 -- | Do asynchronous IO. The @Delay@ fires when it's done.
-async :: ( Monoid x ) => IO t -> React a (Delay a x f t)
+async :: ( Semigroup x ) => IO t -> React a (Delay a x f t)
 async io = React $ asyncNow io
 
 asyncOSNow
-  :: ( Monoid r, Monoid x, Functor f )
+  :: ( Semigroup r, Semigroup x, Functor f )
   => IO t
   -> Now a r q f (Delay a x g t)
 asyncOSNow io = do
@@ -855,7 +899,7 @@ asyncOSNow io = do
 
 -- | Do asynchronous IO in an OS thread. The @Delay@ fires when it's done.
 asyncOS
-  :: ( Monoid x )
+  :: ( Semigroup x )
   => IO t
   -> React a (Delay a x f t)
 asyncOS io = React $ asyncOSNow io
@@ -863,7 +907,7 @@ asyncOS io = React $ asyncOSNow io
 -- | A primitive event and a function to fire it.
 primEventNow
   :: forall a r q x f g t .
-     ( Monoid r, Monoid x, Functor f )
+     ( Semigroup r, Semigroup x, Functor f )
   => Now a r q f (Delay a x g t, t -> IO ())
 primEventNow = Now $ ReaderT $ \nowEnv -> do
   domainKey :: LVault.DomainKey t <- LVault.newDomainKey
@@ -880,30 +924,28 @@ primEventNow = Now $ ReaderT $ \nowEnv -> do
                       <- takeMVar (nowEval nowEnv)
                     (pulsesMap, _) <- runMapAlgebra LVault.empty LVault.union fmap pulses
                     case LVault.lookup domainKey pulsesMap of
-                      Nothing -> do
-                        --trace ("Squelching unobserved event") (pure ())
-                        putMVar (nowEval nowEnv) stuff
+                      Nothing -> putMVar (nowEval nowEnv) stuff
                       Just (computation :: t -> Event a r f q) -> do
                         let Event cached = computation t
-                            syncf :: SyncF f (Either q (Delay a r f q), r)
+                            syncf :: SyncF f (Either q (Delay a r f q), Option r)
                             syncf = runWriterT (runCached cached)
-                            statet :: StateT (Embedding f IO) IO (Either q (Delay a r f q), r)
+                            statet :: StateT (Embedding f IO) IO (Either q (Delay a r f q), Option r)
                             statet = embedSyncF syncf
-                        ((choice' :: Either q (Delay a r f q), rs), embedding')
+                        ((choice' :: Either q (Delay a r f q), Option r), embedding')
                           <- runStateT statet embedding
                         _ <- case choice' of
                           Left done -> do
-                            _ <- writeChan (nowChan nowEnv) (rs, Just done)
+                            _ <- writeChan (nowChan nowEnv) (r, Just done)
                             pure ()
                           Right delay' -> do
                             _ <- putMVar (nowEval nowEnv) (delay', embedding')
-                            _ <- writeChan (nowChan nowEnv) (rs, Nothing)
+                            _ <- writeChan (nowChan nowEnv) (r, Nothing)
                             pure ()
                         pure ()
   pure (delay, cb)
 
 -- | Get a @Delay@ and a function to pulse it.
-primEvent :: ( Monoid x ) => React a (Delay a x f t, t -> IO ())
+primEvent :: ( Semigroup x ) => React a (Delay a x f t, t -> IO ())
 primEvent = React primEventNow
 
 -- | A React term which yields an Event, such that the Event cannot contain
@@ -917,14 +959,14 @@ data Reactive (r :: *) (f :: * -> *) (t :: *) = Reactive {
     runReactive :: forall (a :: *) . Event a r (Compose f (React a)) t
   }
 
-instance ( Monoid r ) => Functor (Reactive r f) where
+instance ( Semigroup r ) => Functor (Reactive r f) where
   fmap f (Reactive react) = Reactive $ fmap f react
 
 reactive :: (forall a . Event a r (Compose f (React a)) t) -> Reactive r f t
 reactive = Reactive
 
 -- | Represents an active network.
-newtype Network r q = Network (Chan (r, Maybe q))
+newtype Network r q = Network (Chan (Maybe r, Maybe q))
 
 -- | Set up a Network for a Reactive computation. The functor parameter of
 --   the Reactive must not be capable of doing React computations, else it
@@ -932,7 +974,7 @@ newtype Network r q = Network (Chan (r, Maybe q))
 --   which would almost surely cause a crash).
 reactimate
   :: forall a r q f .
-     ( Monoid r, Functor f )
+     ( Semigroup r, Functor f )
   => Embedding f Identity
   -> Reactive r f q
   -> IO (Network r q)
@@ -942,9 +984,9 @@ reactimate embedding reactive = do
   let nowEnv = NowEnv chan mvar
   case reactive of
     (Reactive (Event cached :: forall a . Event a r (Compose f (React a)) q)) -> do
-      let syncf :: SyncF (Compose f (React a)) (Either q (Delay a r (Compose f (React a)) q), r)
+      let syncf :: SyncF (Compose f (React a)) (Either q (Delay a r (Compose f (React a)) q), Option r)
           syncf = runWriterT (runCached cached)
-          statet :: StateT (Embedding (Compose f (React a)) IO) IO (Either q (Delay a r (Compose f (React a)) q), r)
+          statet :: StateT (Embedding (Compose f (React a)) IO) IO (Either q (Delay a r (Compose f (React a)) q), Option r)
           statet = embedSyncF syncf
       let embedReactIO :: Embedding (React a) IO
           embedReactIO = embedNow nowEnv
@@ -959,36 +1001,36 @@ reactimate embedding reactive = do
           embedding'' = embedComposeInR embedFIO
                         `composeEmbedding`
                         embedComposeR embedReactIO
-      ((choice, rs), embedding'') <- runStateT statet embedding''
+      ((choice, Option r), embedding'') <- runStateT statet embedding''
       case choice of
         Left done -> do
-          writeChan chan (rs, Just done)
+          writeChan chan (r, Just done)
         Right delay -> do
           _ <- putMVar mvar (delay, embedding'')
-          writeChan chan (rs, Nothing)
+          writeChan chan (r, Nothing)
       pure (Network chan)
 
 -- | Use a reactive network to do IO whenever its side channel fires, whenever
 --   its output fires, and whenever it is determined to have stalled.
 runNetwork
   :: Network r q
-  -> (r -> IO ()) -- ^ Respond to the side-channel.
-  -> (q -> IO z)  -- ^ Respond to the final value.
-  -> IO z         -- ^ Respond to a lock-up: no more events will fire.
+  -> (Maybe r -> IO ()) -- ^ Respond to the side-channel.
+  -> (q -> IO z)        -- ^ Respond to the final value.
+  -> IO z               -- ^ Respond to a lock-up: no more events will fire.
   -> IO z
 runNetwork network k f g = catch (runNetwork_ network k f) $
   -- Blocked indefinitely on an mvar means the network is stuck.
   \(_ :: BlockedIndefinitelyOnMVar) -> g
 
-runNetwork_ :: Network r q -> (r -> IO ()) -> (q -> IO z) -> IO z
+runNetwork_ :: Network r q -> (Maybe r -> IO ()) -> (q -> IO z) -> IO z
 runNetwork_ network@(Network chan) k f = do
   -- We don't want this readChan to cause the runtime to kill the thread, in
   -- case for instance the network is exhausted and there are no more references
   -- to it (thread blocked indefinitely).
   -- runNetwork catches BlockedIndefinitelyOnMVar and runs some default
   -- IO response.
-  (rs, out) <- readChan chan
-  _ <- k rs
+  (mr, out) <- readChan chan
+  _ <- k mr
   case out of
     Just q -> f q
     Nothing -> runNetwork_ network k f
